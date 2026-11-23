@@ -60,13 +60,14 @@ def main():
 
     def discover(url, depth):
         for sub in subdirs(url):
-            if SHORT in sub and "arm64" not in sub:
+            if (SHORT in sub or sub == ARCH) and "arm64" not in sub:
                 pkgs.update(read_repo(f"{url}/{sub}"))
             elif depth > 0 and re.fullmatch(r"\d+", sub):
                 discover(f"{url}/{sub}", depth - 1)
 
     if "qtwebengine" in modules:
-        discover(f"{ALL_OS}/extensions/qtwebengine/{vs}", 2)
+        # Binários do Windows: windows_x86/extensions/qtwebengine/<versão>/...
+        discover(f"{BASE}/extensions/qtwebengine/{vs}", 2)
 
     if not pkgs:
         raise SystemExit("Nenhum índice do Qt encontrado")
