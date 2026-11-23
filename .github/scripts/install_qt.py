@@ -9,6 +9,7 @@ Uso: python install_qt.py 6.12.1 D:\\Qt modulo1 modulo2 ...
 import os, re, subprocess, sys, urllib.request, xml.etree.ElementTree as ET
 
 BASE = "https://download.qt.io/online/qtsdkrepository/windows_x86"
+ALL_OS = "https://download.qt.io/online/qtsdkrepository/all_os"
 ARCH = "win64_msvc2022_64"
 SHORT = "msvc2022_64"
 
@@ -29,7 +30,7 @@ def read_repo(folder: str) -> dict:
     try:
         root = ET.fromstring(fetch(url))
     except SystemExit:
-        print(f"(sem índice em {url})")
+        print(f"(sem indice em {url})")
         return {}
     pkgs = {}
     for p in root.iter("PackageUpdate"):
@@ -49,9 +50,19 @@ def main():
     vs = version.replace(".", "")
     pkgs = {}
     pkgs.update(read_repo(f"{BASE}/desktop/qt6_{vs}/qt6_{vs}_{SHORT}"))
-    for ext in ("qtwebengine", "qtpdf"):
-        if "qtwebengine" in modules or ext == "qtwebengine":
-            pkgs.update(read_repo(f"{BASE}/extensions/{ext}/{vs}/{ARCH}"))
+    # Desde a 6.11, o QtWebEngine fica em all_os/extensions/qtwebengine/<versão>/,
+    # com uma subpasta por plataforma. Descobre a da MSVC 64 bits pela listagem.
+    if "qtwebengine" in modules:
+        ext_base = f"{ALL_OS}/extensions/qtwebengine/{vs}"
+        listing = fetch(ext_base + "/").decode("utf-8", "replace")
+        subdirs = sorted(set(re.findall(r'href="([^"?/][^"]*)/"', listing)))
+        print("subpastas do QtWebEngine:", subdirs)
+        for sub in subdirs:
+            if SHORT in sub and "arm64" not in sub:
+                pkgs.update(read_repo(f"{ext_base}/{sub}"))
+        if not any("webengine" in n for n in pkgs):
+            for sub in subdirs:
+                pkgs.update(read_repo(f"{ext_base}/{sub}"))
     if not pkgs:
         raise SystemExit("Nenhum índice do Qt encontrado")
 

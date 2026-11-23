@@ -4,12 +4,15 @@ jobs:
   d:
     runs-on: windows-2022
     steps:
-      - shell: bash
+      - uses: actions/checkout@v4
+      - shell: pwsh
         run: |
-          set +e +o pipefail
-          B=https://download.qt.io/online/qtsdkrepository
-          ls_() { curl -sL "$1/" | grep -o 'href="[^"?/][^"]*"' | grep -v -E 'static|mirrorbrain|apache' ; }
-          echo "== windows_x86/addons"; ls_ $B/windows_x86/addons | head -40
-          echo "== all_os/extensions"; ls_ $B/all_os/extensions | head -20
-          for p in $B/windows_x86/addons/qtwebengine $B/all_os/extensions/qtwebengine; do echo "== $p"; ls_ $p | head -15; done
-          for v in 6121 612; do for p in $B/windows_x86/addons/qtwebengine/$v $B/windows_x86/addons/qt6_$v; do echo "== $p"; ls_ $p | head -20; done; done
+          $env:PYTHONIOENCODING = "utf-8"
+          python .github/scripts/install_qt.py 6.12.0 D:\Qt qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $root = (Get-Content $env:GITHUB_ENV | Select-String "QT_ROOT_DIR=" | Select-Object -Last 1).ToString() -replace "QT_ROOT_DIR=",""
+          echo "ROOT=$root"
+          & "$root\bin\qtpaths.exe" --qt-query | Select-Object -First 6
+          Get-ChildItem "$root\lib\cmake" -Name | Select-String "WebEngine|Multimedia|HttpServer|Core5Compat|Positioning|WebSockets|Svg|Quick$|WebChannel"
+          Test-Path "$root\bin\windeployqt.exe"
+          Test-Path "$root\bin\QtWebEngineProcess.exe"
