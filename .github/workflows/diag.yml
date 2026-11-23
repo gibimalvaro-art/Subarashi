@@ -6,9 +6,12 @@ jobs:
     steps:
       - shell: bash
         run: |
-          B=https://download.qt.io/online/qtsdkrepository/windows_x86
+          set +e +o pipefail
+          B=https://download.qt.io/online/qtsdkrepository
           ls_() { curl -sL "$1/" | grep -o 'href="[^"?/][^"]*"' | grep -v -E 'static|mirrorbrain|apache' ; }
-          echo "== extensions"; ls_ $B/extensions
-          echo "== extensions/qtwebengine"; ls_ $B/extensions/qtwebengine | tail -12
-          for v in 6121 612 6120; do echo "== qtwebengine/$v"; ls_ $B/extensions/qtwebengine/$v; done
-          echo "== desktop/qt6_612"; ls_ $B/desktop/qt6_612 | head -30
+          echo "== desktop/qt6_612"; ls_ $B/windows_x86/desktop/qt6_612
+          for d in $(ls_ $B/windows_x86/desktop/qt6_612 | cut -d'"' -f2 | head -8); do echo "== qt6_612/$d"; ls_ $B/windows_x86/desktop/qt6_612/$d | head -12; done
+          echo "== root"; ls_ $B/windows_x86
+          echo "== all_os"; ls_ $B/all_os
+          echo "== all_os/qt"; ls_ $B/all_os/qt | head -40
+          curl -sL $B/windows_x86/desktop/qt6_6121/qt6_6121_msvc2022_64/Updates.xml | grep -o "<Name>[^<]*webengine[^<]*</Name>" | head
