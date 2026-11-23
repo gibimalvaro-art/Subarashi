@@ -47,18 +47,25 @@ jobs:
             vcpkg-${{ hashFiles('daemon/contrib/vcpkg/**') }}-
             vcpkg-
 
-      - name: Instalar o Qt 6.12
-        uses: jurplel/install-qt-action@v4
+      - name: Qt guardado de execuções anteriores
+        id: qtcache
+        uses: actions/cache@v4
         with:
-          version: "6.12.*"
-          host: windows
-          target: desktop
-          arch: win64_msvc2022_64
-          modules: >-
-            qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets
-            qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
-          aqtversion: "==3.3.*"
-          cache: true
+          path: D:\Qt
+          key: qt-6.12.1-msvc2022_64-v1-${{ hashFiles('.github/scripts/install_qt.py') }}
+
+      - name: Instalar o Qt 6.12
+        shell: pwsh
+        run: |
+          if (Test-Path D:\Qt\qt-root.txt) {
+            $root = Get-Content D:\Qt\qt-root.txt
+            "QT_ROOT_DIR=$root" | Out-File -Append $env:GITHUB_ENV
+            echo "Qt já em cache: $root"
+          } else {
+            python .github/scripts/install_qt.py 6.12.1 D:\Qt qtbase qtdeclarative qtsvg qttools qttranslations qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
+            Get-Content $env:GITHUB_ENV | Select-String QT_ROOT_DIR
+            ((Get-Content $env:GITHUB_ENV | Select-String "QT_ROOT_DIR=" | Select-Object -Last 1).ToString() -replace "QT_ROOT_DIR=","") | Out-File -Encoding ascii D:\Qt\qt-root.txt
+          }
 
       - name: Conferir ferramentas
         shell: pwsh

@@ -4,14 +4,11 @@ jobs:
   d:
     runs-on: windows-2022
     steps:
-      - shell: bash
+      - uses: actions/checkout@v4
+      - shell: pwsh
         run: |
-          B=https://download.qt.io/online/qtsdkrepository/windows_x86/desktop
-          curl -sL $B/ | grep -o 'href="[^"]*"' | grep -i qt6_61 | head -40
-          echo ---- qt6_6121
-          curl -sL $B/qt6_6121/ | grep -o 'href="[^"]*"' | head -40
-          for d in $(curl -sL $B/qt6_6121/ | grep -o 'href="qt6_6121[^"/]*' | cut -d'"' -f2 | head -6); do echo "---- $d"; curl -sL $B/qt6_6121/$d/ | grep -o 'href="[^"]*"' | head -15; done
-          pip install -q aqtinstall==3.3.0
-          python -m aqt list-qt windows desktop --arch 6.12.1 || true
-          python -m aqt list-qt windows desktop --modules 6.12.1 win64_msvc2022_64 || true
-          python -m aqt list-qt windows desktop | tail -3
+          python .github/scripts/install_qt.py 6.12.1 D:\Qt qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
+          Get-ChildItem D:\Qt -Depth 1
+          $root = (Get-Content $env:GITHUB_ENV | Select-String "QT_ROOT_DIR=" | Select-Object -Last 1).ToString() -replace "QT_ROOT_DIR=",""
+          & "$root\bin\qtpaths.exe" --qt-query | Select-Object -First 8
+          Get-ChildItem "$root\lib\cmake" -Name | Select-String "WebEngine|Multimedia|HttpServer|Core5Compat|Positioning|WebSockets|Svg|Quick$"
