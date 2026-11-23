@@ -853,7 +853,9 @@ if(MSVC)
     /wd4068 /wd4099 /wd4189 /wd4267 /wd4577 /wd4467 /wd4715 /wd4828)
   add_compile_options(
     /MP /GS /W3 /Gy /Zc:__cplusplus /Zc:wchar_t /Zc:externConstexpr /Zi /Gm- /O2 /Zc:inline /fp:precise)
-  add_compile_options(/Gd /Oi /MD /FC /EHsc /nologo /sdl /constexpr:steps16777216)
+  add_compile_options(/Gd /Oi /MD /FC /EHsc /nologo /sdl /wd4996 /constexpr:steps16777216)
+  # Subarashi: o Qt 6.12.0 marca invalidateRowsFilter() como obsoleta, e o /sdl
+  # transforma esse aviso (C4996) em erro. /wd4996 so silencia avisos de obsoleto.
 
   # linker options
   add_link_options(
