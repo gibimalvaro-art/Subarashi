@@ -90,4 +90,6 @@ reaplique o commit (`git cherry-pick`), resolvendo conflitos nas traduções, se
 houver.
 
 Origem: `https://github.com/savoirfairelinux/jami-client-qt`, commit `15eb82e`
-(20/11/2026).
+(20/11/2026). O núcleo (`daemon`) foi fixado no commit `5de2459`, da mesma
+data: o que vinha fixado (`cf666d8`, de 12/11) não tinha funções que a
+interface já usa.
