@@ -1,0 +1,21 @@
+# Scope
+- Only change what the task requires
+- Aim for long-term maintainability and high-quality code. No dirty hacks or "just get it working" solutions.
+
+# Tests
+- Bug fixes must follow TDD: write a failing regression test first, then fix the code. Does not apply to ui tweaks and cosmetic changes.
+- New features should follow TDD where practical
+- Update tests when changing tested logic
+- Do not delete tests unless the covered behavior is removed
+- Run tests with `cqfd -b unit` (unit) or `cqfd -b qml` (QML) to verify
+
+# Docs
+- Update docs when changing public interfaces or user-facing behavior
+- Do not update docs for internal refactors
+
+# Dependencies
+- Prefer CMake fetch content over git submodules; follow the rules in `contrib_tools.cmake`
+- Note that the ability to build offline is critical, so system dependency support is important
+
+# Validation
+- Validate only at system boundaries (user input, external APIs, file I/O)

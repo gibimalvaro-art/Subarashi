@@ -1,0 +1,109 @@
+# Subarashi: compila o programa para Windows nos computadores do GitHub.
+#
+# Como usar: aba "Actions" > "Compilar Subarashi para Windows" > "Run workflow".
+# A primeira vez é longa (as bibliotecas do núcleo do Jami são compiladas do
+# zero, 2 a 5 horas). Elas ficam guardadas em cache, e as próximas vezes são
+# bem mais rápidas. Se a primeira estourar o tempo, rode de novo: o que já
+# foi compilado não se perde.
+#
+# Resultado: um .zip com o Subarashi.exe pronto, publicado na aba "Releases".
+
+name: Compilar Subarashi para Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 355
+    env:
+      # O script de compilação do Jami usa este nome para ligar o modo "CI":
+      # apaga as pastas temporárias de cada biblioteca depois de compilada
+      # (economiza disco) e serializa a escrita dos arquivos de depuração.
+      JENKINS_URL: "github-actions"
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-cache,readwrite"
+      VCPKG_DISABLE_METRICS: "1"
+      # O vcpkg que já vem no Windows do GitHub não tem a versão fixada pelo
+      # Jami; vazio faz o script baixar a versão certa.
+      VCPKG_ROOT: ""
+
+    steps:
+      - name: Baixar o código (com o núcleo do Jami)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restaurar bibliotecas já compiladas
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ hashFiles('daemon/contrib/vcpkg/**') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ hashFiles('daemon/contrib/vcpkg/**') }}-
+            vcpkg-
+
+      - name: Instalar o Qt 6.12
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.12.*"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: >-
+            qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets
+            qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
+          aqtversion: "==3.3.*"
+          cache: true
+
+      - name: Conferir ferramentas
+        shell: pwsh
+        run: |
+          python --version
+          cmake --version
+          rustup show
+          echo "Qt em $env:QT_ROOT_DIR"
+
+      - name: Compilar
+        shell: pwsh
+        timeout-minutes: 320
+        run: |
+          New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
+          python extras/scripts/build-windows.py --init --qt "$env:QT_ROOT_DIR"
+          python extras/scripts/build-windows.py --qt "$env:QT_ROOT_DIR"
+
+      - name: Guardar bibliotecas compiladas (mesmo se a compilação falhar)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ hashFiles('daemon/contrib/vcpkg/**') }}-${{ github.run_id }}
+
+      - name: Empacotar
+        shell: pwsh
+        run: |
+          if (-not (Test-Path x64/Release/Subarashi.exe)) { throw "Subarashi.exe não foi gerado" }
+          Copy-Item LEIA-ME-SUBARASHI.md x64/Release/
+          Copy-Item COPYING x64/Release/LICENCA-GPLv3.txt -ErrorAction SilentlyContinue
+          Compress-Archive -Path x64/Release/* -DestinationPath Subarashi-windows-x64.zip -Force
+
+      - name: Guardar o .zip nesta execução
+        uses: actions/upload-artifact@v4
+        with:
+          name: Subarashi-windows-x64
+          path: Subarashi-windows-x64.zip
+
+      - name: Publicar na aba Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-${{ github.run_number }}
+          name: Subarashi para Windows (compilação ${{ github.run_number }})
+          body: |
+            Baixe `Subarashi-windows-x64.zip`, extraia numa pasta e abra `Subarashi.exe`.
+            Não instale junto com o Jami oficial no mesmo computador.
+            Código-fonte: este repositório (GPLv3).
+          files: Subarashi-windows-x64.zip

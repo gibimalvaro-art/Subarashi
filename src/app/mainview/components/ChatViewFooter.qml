@@ -1,0 +1,291 @@
+/*
+ * Copyright (C) 2020-2026 Savoir-faire Linux Inc.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
+import net.jami.Models 1.1
+import net.jami.Constants 1.1
+import net.jami.Adapters 1.1
+import "../../commoncomponents"
+
+Rectangle {
+    id: root
+    property alias textInput: messageBar.textAreaObj
+    property alias messageBar: messageBar
+    property string previousConvId
+    property string previousAccountId
+    property bool showTypo: messageBar.showTypo
+    property real marginSize: 4
+
+    // Injected conversation context; defaults to the global singleton for
+    // the main window.
+    property var convContext: CurrentConversation
+    // The thread panel's composer: sends reply to the open thread.
+    property bool inThread: false
+
+    function pasteText() {
+        if (!messageBar.canComposeText)
+            return;
+        messageBar.textAreaObj.pasteText();
+    }
+
+    function setFilePathsToSend(filePaths) {
+        if (!(messageBar.replyToId || root.inThread ? convContext.canReplyFile : convContext.canSendFile))
+            return;
+        for (var index = 0; index < filePaths.length; ++index) {
+            var path = UtilsAdapter.getAbsPath(decodeURIComponent(filePaths[index]));
+            messageBar.fileContainer.filesToSendListModel.addToPending(path);
+        }
+    }
+
+    implicitHeight: messageBar.height + 2 * marginSize
+    height: implicitHeight
+
+    color: JamiTheme.transparentColor
+
+    function updateMessageDraft() {
+        // Store the current files that have not been sent, if any. Do the same for the message draft.
+        var filePathDraft = [];
+        while (messageBar.fileContainer.filesToSendCount > 0) {
+            var currentIndex = messageBar.fileContainer.filesToSendListModel.index(0, 0);
+            var filePath = messageBar.fileContainer.filesToSendListModel.data(currentIndex, FilesToSend.FilePath);
+            filePathDraft.push(filePath);
+            messageBar.fileContainer.filesToSendListModel.removeFromPending(0);
+        }
+        LRCInstance.setContentDraft(previousConvId, previousAccountId, messageBar.text, filePathDraft);
+        previousConvId = convContext.id;
+        previousAccountId = CurrentAccount.id;
+
+        // turn off the button animations when switching convs
+        messageBar.animate = false;
+        messageBar.textAreaObj.clearText();
+
+        // restore the draft state of contents for a specific conversation
+        var restoredContent = LRCInstance.getContentDraft(convContext.id, CurrentAccount.id);
+        if (restoredContent) {
+            messageBar.textAreaObj.insertText(restoredContent["text"]);
+            for (var i = 0; i < restoredContent["files"].length; ++i) {
+                messageBar.fileContainer.filesToSendListModel.addToPending(restoredContent["files"][i]);
+            }
+        }
+    }
+
+    Connections {
+        target: convContext
+
+        function onIdChanged() {
+            messageBar.animate = true;
+        }
+    }
+
+    Connections {
+        target: MessagesAdapter
+
+        function onNewFilePasted(filePath) {
+            if (!messageBar.textAreaObj.pasting
+                    || !(messageBar.replyToId || root.inThread ? convContext.canReplyFile : convContext.canSendFile))
+                return;
+            messageBar.fileContainer.filesToSendListModel.addToPending(filePath);
+        }
+
+        function onNewTextPasted() {
+            if (messageBar.textAreaObj.pasting)
+                root.pasteText();
+        }
+    }
+
+    // Reply and edit state is shared; each composer reacts to the messages of its own list.
+    Connections {
+        target: messageBar
+
+        function onEditIdChanged() {
+            if (messageBar.editId.length > 0 && messageBar.canComposeText) {
+                var editedMessageBody = MessagesAdapter.dataForInteraction(messageBar.editId, MessageList.OriginalBody);
+                messageBar.textAreaObj.insertText(editedMessageBody);
+                messageBar.textAreaObj.forceActiveFocus();
+            } else {
+                messageBar.textAreaObj.clearText();
+            }
+        }
+
+        function onReplyToIdChanged() {
+            if (messageBar.replyToId.length > 0 && messageBar.canComposeText)
+                messageBar.textAreaObj.forceActiveFocus();
+        }
+    }
+
+    RecordBox {
+        id: recordBox
+        inThread: root.inThread
+
+        visible: false
+        parent: root
+        x: messageBar.x + 140
+        y: isVideo ? -165 : -65
+    }
+
+    MessageBar {
+        id: messageBar
+        convContext: root.convContext
+        inThread: root.inThread
+
+        anchors.bottom: root.bottom
+        anchors.bottomMargin: marginSize
+        anchors.horizontalCenter: root.horizontalCenter
+
+        width: root.width - 2 * marginSize
+
+        property var emojiPicker
+
+        Connections {
+            target: messageBar.emojiPicker ? messageBar.emojiPicker : null
+            function onEmojiIsPicked(content) {
+                if (messageBar.canComposeText)
+                    messageBar.textAreaObj.insertText(content);
+                messageBar.isEmojiPickerOpen = false;
+            }
+
+            function onClosed() {
+                messageBar.isEmojiPickerOpen = false;
+            }
+        }
+
+        // Created up front and reused: the WebEngine picker spawns a render
+        // process and loads the emoji data, which takes seconds on Windows.
+        Component.onCompleted: Qt.callLater(createEmojiPicker)
+
+        function openEmojiPicker() {
+            if (!messageBar.emojiPicker)
+                createEmojiPicker();
+            if (messageBar.emojiPicker) {
+                messageBar.emojiPicker.x = setXposition();
+                messageBar.emojiPicker.y = setYposition();
+                messageBar.emojiPicker.openEmojiPicker();
+            }
+        }
+
+        Item {
+            id: emojiWarmHost
+            width: 1
+            height: 1
+            clip: true
+            anchors.left: parent.left
+            anchors.bottom: parent.bottom
+        }
+
+        function createEmojiPicker() {
+            if (messageBar.emojiPicker)
+                return;
+            var component = WITH_WEBENGINE ? Qt.createComponent("qrc:/webengine/emojipicker/EmojiPicker.qml") : Qt.createComponent("qrc:/nowebengine/EmojiPicker.qml");
+            messageBar.emojiPicker = component.createObject(messageBar, {
+                "x": setXposition(),
+                "y": setYposition(),
+                "listView": null,
+                "warmHost": emojiWarmHost
+            });
+            if (messageBar.emojiPicker === null) {
+                console.log("Error creating emojiPicker in chatViewFooter");
+            }
+        }
+        onWidthChanged: {
+            if (emojiPicker)
+                emojiPicker.x = setXposition();
+        }
+
+        function setXposition() {
+            return messageBar.width - JamiTheme.emojiPickerWidth;
+        }
+
+        function setYposition() {
+            return -JamiTheme.emojiPickerHeight;
+        }
+
+        sendButtonVisibility: (canComposeText && text.trim()) || messageBar.fileContainer.filesToSendCount
+
+        onEmojiButtonClicked: {
+            if (emojiPicker && emojiPicker.opened) {
+                emojiPicker.closeEmojiPicker();
+                isEmojiPickerOpen = false;
+            } else {
+                openEmojiPicker();
+                isEmojiPickerOpen = true;
+            }
+        }
+
+        onShowMapClicked: {
+            PositionManager.setMapActive(CurrentAccount.id);
+        }
+
+        onSendFileButtonClicked: {
+            if (typeof viewCoordinator === "undefined")
+                return;
+            var dlg = viewCoordinator.presentDialog(appWindow, "commoncomponents/JamiFileDialog.qml", {
+                "fileMode": JamiFileDialog.OpenFiles,
+                "nameFilters": [JamiStrings.allFiles]
+            }, true); // is a single instance
+            dlg.filesAccepted.connect(function (files) {
+                setFilePathsToSend(files);
+            });
+        }
+
+        onVideoRecordMessageButtonClicked: {
+            recordBox.openRecorder(true);
+        }
+
+        onAudioRecordMessageButtonClicked: {
+            recordBox.openRecorder(false);
+        }
+
+        onSendMessageButtonClicked: {
+            const replyThread = !root.inThread && MessagesAdapter.threadedView && messageBar.editId === ""
+                                ? MessagesAdapter.threadMessageListModel.threadRootOf(messageBar.replyToId) : "";
+            var canSendText = messageBar.canComposeText;
+            // Send file messages
+            var fileCounts = messageBar.fileContainer.filesToSendListModel.rowCount();
+            for (var i = 0; i < fileCounts; i++) {
+                var currentIndex = messageBar.fileContainer.filesToSendListModel.index(i, 0);
+                var filePath = messageBar.fileContainer.filesToSendListModel.data(currentIndex, FilesToSend.FilePath);
+                MessagesAdapter.sendFile(filePath, root.inThread);
+            }
+            messageBar.fileContainer.filesToSendListModel.flush();
+            // Send text message
+            if (canSendText && messageBar.text) {
+                if (messageBar.editId !== "") {
+                    MessagesAdapter.editMessage(convContext.id, messageBar.text);
+                } else {
+                    MessagesAdapter.sendMessageToUid(messageBar.text, convContext.id, root.inThread);
+                }
+            }
+            if (canSendText)
+                messageBar.textAreaObj.clearText();
+            if (messageBar.replyToId !== "")
+                MessagesAdapter.replyToId = "";
+            if (replyThread !== "")
+                MessagesAdapter.threadMessageListModel.threadId = replyThread;
+        }
+
+        Keys.onShortcutOverride: function (keyEvent) {
+            if (keyEvent.key === Qt.Key_Escape) {
+                if (recordBox != null && recordBox.opened) {
+                    recordBox.closeRecorder();
+                } else if (PositionManager.isMapActive(CurrentAccount.id)) {
+                    PositionManager.setMapInactive(CurrentAccount.id);
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,147 @@
+/*
+ * Copyright (C) 2021-2026 Savoir-faire Linux Inc.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "conversationlistproxymodel.h"
+
+#include "uri.h"
+
+ConversationListProxyModel::ConversationListProxyModel(QAbstractListModel* model, QObject* parent)
+    : SelectableListProxyModel(model, parent)
+{
+    setSortRole(ConversationList::Role::LastInteractionTimeStamp);
+    sort(0, Qt::DescendingOrder);
+    setFilterCaseSensitivity(Qt::CaseSensitivity::CaseInsensitive);
+}
+
+bool
+ConversationListProxyModel::filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const
+{
+    QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
+
+    auto rx = filterRegularExpression();
+    auto uriStripper = URI(rx.pattern());
+    bool stripScheme = (uriStripper.schemeType() < URI::SchemeType::COUNT__);
+    FlagPack<URI::Section> flags = URI::Section::USER_INFO | URI::Section::HOSTNAME | URI::Section::PORT;
+    if (!stripScheme) {
+        flags |= URI::Section::SCHEME;
+    }
+    rx.setPattern(uriStripper.format(flags));
+
+    using namespace ConversationList;
+    if (index.data(Role::Uris).toStringList().isEmpty()) {
+        // TODO: Find out why, and fix in libjami/libjamiclient.
+        qCritical() << "Filtering 0 member conversation. Fix me" << index.data(Role::UID).toString();
+        return false;
+    }
+
+    QStringList toFilter;
+    toFilter += index.data(Role::Title).toString();
+    toFilter += index.data(Role::Uris).toStringList();
+    toFilter += index.data(Role::Monikers).toStringList();
+
+    const auto isRequest = index.data(Role::IsRequest).toBool();
+    const auto mode = static_cast<conversation::Mode>(index.data(Role::Mode).toInt());
+    const bool isSearching = !rx.pattern().isEmpty();
+    const bool matchesCategory = category_ == All || categoryForMode(mode) == category_;
+    const bool matchesRequestFilter = category_ == Feeds || isRequest == invitationsOnly_;
+    const bool feedInvitationExcludedFromAll = category_ == All && isRequest && mode == conversation::Mode::FEED;
+    const bool categoryMatch = isSearching
+                               || (matchesCategory && matchesRequestFilter && !feedInvitationExcludedFromAll);
+
+    bool match {false};
+
+    // banned contacts require exact match
+    if (ignored_.contains(index.data(Role::UID).toString())) {
+        match = true;
+    } else if (index.data(Role::IsBanned).toBool()) {
+        if (!rx.pattern().isEmpty() && rx.isValid()) {
+            Q_FOREACH (const auto& filter, toFilter) {
+                auto matchResult = rx.match(filter);
+                if (matchResult.hasMatch() && matchResult.captured(0) == filter) {
+                    match = true;
+                    break;
+                }
+            }
+        }
+    } else {
+        Q_FOREACH (const auto& filter, toFilter)
+            if (rx.isValid() && rx.match(filter).hasMatch()) {
+                match = true;
+                break;
+            }
+    }
+
+    return categoryMatch && match;
+}
+
+bool
+ConversationListProxyModel::lessThan(const QModelIndex& left, const QModelIndex& right) const
+{
+    const bool leftRequest = left.data(ConversationList::Role::IsRequest).toBool();
+    const bool rightRequest = right.data(ConversationList::Role::IsRequest).toBool();
+    if (category_ == Feeds && filterRegularExpression().pattern().isEmpty() && leftRequest != rightRequest)
+        return leftRequest;
+
+    QVariant leftData = sourceModel()->data(left, sortRole());
+    QVariant rightData = sourceModel()->data(right, sortRole());
+    // we're assuming the sort role data type here is some integral time
+    return leftData.toULongLong() < rightData.toULongLong();
+}
+
+ConversationListProxyModel::Category
+ConversationListProxyModel::categoryForMode(conversation::Mode mode)
+{
+    switch (mode) {
+    case conversation::Mode::FEED:
+        return Feeds;
+    case conversation::Mode::ONE_TO_ONE:
+    case conversation::Mode::NON_SWARM:
+        return OneToOne;
+    case conversation::Mode::ADMIN_INVITES_ONLY:
+    case conversation::Mode::INVITES_ONLY:
+    case conversation::Mode::PUBLIC:
+        return Groups;
+    }
+    return Groups;
+}
+
+void
+ConversationListProxyModel::setFilter(const QString& filterString)
+{
+    setFilterFixedString(filterString);
+    if (category_ == Feeds)
+        invalidate();
+    updateSelection();
+}
+
+void
+ConversationListProxyModel::setCategory(Category category)
+{
+    category_ = category;
+    // invalidate() rather than a filter change: sort order depends on the category too.
+    invalidate();
+    updateSelection();
+}
+
+void
+ConversationListProxyModel::setInvitationsOnly(bool invitationsOnly)
+{
+    beginFilterChange();
+    invitationsOnly_ = invitationsOnly;
+    endFilterChange();
+    updateSelection();
+}

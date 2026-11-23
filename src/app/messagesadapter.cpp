@@ -1,0 +1,1059 @@
+/*
+ * Copyright (C) 2020-2026 Savoir-faire Linux Inc.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "messagesadapter.h"
+
+#include "appsettingsmanager.h"
+#include "qtutils.h"
+#include "messageparser.h"
+#include "previewengine.h"
+
+#include <api/datatransfermodel.h>
+#include <api/contact.h>
+#include <api/messagelistmodel.h>
+
+#include <QApplication>
+#include <QBuffer>
+#include <QClipboard>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QImageReader>
+#include <QList>
+#include <QMimeData>
+#include <QPointer>
+#include <QMimeDatabase>
+#include <QUrl>
+#include <QtMath>
+#include <QRegularExpression>
+#include <QTemporaryFile>
+
+namespace {
+using lrc::api::permissions::Permission;
+} // namespace
+
+MessagesAdapter::MessagesAdapter(AppSettingsManager* settingsManager,
+                                 PreviewEngine* previewEngine,
+                                 LRCInstance* instance,
+                                 QObject* parent)
+    : QmlAdapterBase(instance, parent)
+    , settingsManager_(settingsManager)
+    , network_(previewEngine)
+    , messageParser_(new MessageParser(previewEngine, this))
+    , filteredMsgListModel_(new FilteredMsgListModel(this))
+    , threadedMsgListModel_(new ThreadedMsgListModel(this))
+    , threadMsgListModel_(new ThreadedMsgListModel(this))
+    , mediaInteractions_(std::make_unique<MessageListModel>(nullptr))
+    , timestampTimer_(new QTimer(this))
+    , curLocale_(QLocale(settingsManager_->getLanguage()))
+{
+    setObjectName(typeid(*this).name());
+    updateDateFormats();
+
+    set_messageListModel(QVariant::fromValue(filteredMsgListModel_));
+    threadedMsgListModel_->setSourceModel(filteredMsgListModel_);
+    set_threadedMessageListModel(QVariant::fromValue(threadedMsgListModel_));
+    threadMsgListModel_->setSourceModel(filteredMsgListModel_);
+    set_threadMessageListModel(QVariant::fromValue(threadMsgListModel_));
+
+    connect(settingsManager_,
+            &AppSettingsManager::reloadHistory,
+            &lrcInstance_->accountModel(),
+            &AccountModel::reloadHistory);
+
+    connect(lrcInstance_, &LRCInstance::selectedConvUidChanged, this, &MessagesAdapter::onSelectedConversationChanged);
+
+    connect(messageParser_, &MessageParser::messageParsed, this, &MessagesAdapter::onMessageParsed);
+    connect(messageParser_, &MessageParser::originalMessageParsed, this, &MessagesAdapter::onOriginalMessageParsed);
+    connect(messageParser_, &MessageParser::linkInfoReady, this, &MessagesAdapter::onLinkInfoReady);
+
+    connect(settingsManager_, &AppSettingsManager::localeChanged, this, [this]() {
+        curLocale_ = QLocale((settingsManager_->getLanguage()));
+        updateDateFormats();
+    });
+    connect(timestampTimer_, &QTimer::timeout, this, &MessagesAdapter::timestampUpdated);
+    timestampTimer_->start(timestampUpdateIntervalMs_);
+
+    connect(lrcInstance_, &LRCInstance::currentAccountIdChanged, this, &MessagesAdapter::connectConversationModel);
+
+    connectConversationModel();
+    // The QML singleton can be created after a conversation was already selected.
+    if (!lrcInstance_->get_selectedConvUid().isEmpty())
+        onSelectedConversationChanged();
+}
+
+void
+MessagesAdapter::onSelectedConversationChanged()
+{
+    set_replyToId("");
+    set_editId("");
+    threadMsgListModel_->setThreadId({});
+    cancelNavigation();
+    historyRequest_.reset();
+    set_historyStalled(false);
+    const QString& convId = lrcInstance_->get_selectedConvUid();
+    const auto& conversation = lrcInstance_->getConversationFromConvUid(convId);
+
+    // Reset the source model for the proxy model.
+    filteredMsgListModel_->setSourceModel(conversation.interactions.get());
+
+    set_currentConvComposingList(conversationTypersUrlToName(conversation.typers));
+}
+
+bool
+MessagesAdapter::threadedView() const
+{
+    return settingsManager_->getValue(Settings::Key::ThreadedView).toBool();
+}
+
+void
+MessagesAdapter::setThreadedView(bool enabled)
+{
+    if (threadedView() == enabled)
+        return;
+    settingsManager_->setValue(Settings::Key::ThreadedView, enabled);
+    if (!enabled) {
+        threadMsgListModel_->setThreadId({});
+        cancelNavigation();
+    }
+    Q_EMIT threadedViewChanged();
+}
+
+QString
+MessagesAdapter::replyTargetFor(const QString& convUid, bool inThread) const
+{
+    if (convUid != lrcInstance_->get_selectedConvUid())
+        return {};
+    if (!replyToId_.isEmpty() && inOpenThread(replyToId_) == inThread)
+        return replyToId_;
+    return inThread ? threadMsgListModel_->threadId() : QString();
+}
+
+bool
+MessagesAdapter::inOpenThread(const QString& id) const
+{
+    const auto& threadId = threadMsgListModel_->threadId();
+    return !threadId.isEmpty() && threadMsgListModel_->threadRootOf(id) == threadId;
+}
+
+bool
+MessagesAdapter::revealMessage(const QString& id)
+{
+    cancelNavigation();
+    const auto root = threadMsgListModel_->threadRootOf(id);
+    if (root.isEmpty()) {
+        set_navigationTarget(id);
+        continueNavigation();
+        return false;
+    }
+    // Roots are in the main list; the open thread stays open beside it.
+    if (root != id)
+        threadMsgListModel_->setThreadId(root);
+    return true;
+}
+
+void
+MessagesAdapter::cancelNavigation()
+{
+    set_navigationTarget({});
+    set_navigationFailed(false);
+}
+
+// Requests the next history batch for the pending target, or gives up when none can be requested.
+void
+MessagesAdapter::continueNavigation()
+{
+    if (!historyRequest_.pending())
+        loadMoreMessages();
+    if (!historyRequest_.pending()) {
+        set_navigationTarget({});
+        set_navigationFailed(true);
+    }
+}
+
+bool
+MessagesAdapter::isDocument(const interaction::Type& type)
+{
+    return interaction::Type::DATA_TRANSFER == type;
+}
+
+void
+MessagesAdapter::loadMoreMessages()
+{
+    if (historyRequest_.pending())
+        return;
+    auto accountId = lrcInstance_->get_currentAccountId();
+    auto convId = lrcInstance_->get_selectedConvUid();
+    try {
+        const auto& convInfo = lrcInstance_->getConversationFromConvUid(convId, accountId);
+        if (convInfo.isSwarm()) {
+            auto requestId = lrcInstance_->getCurrentConversationModel()->loadConversationMessages(convId,
+                                                                                                   loadChunkSize_);
+            historyRequest_.start(accountId, convId, requestId, convInfo.interactions->rowCount());
+        }
+    } catch (const std::exception& e) {
+        qWarning() << e.what();
+    }
+}
+
+void
+MessagesAdapter::connectConversationModel()
+{
+    auto currentConversationModel = lrcInstance_->getCurrentConversationModel();
+    if (currentConversationModel == nullptr) {
+        return;
+    }
+
+    QObject::connect(currentConversationModel,
+                     &ConversationModel::newInteraction,
+                     this,
+                     &MessagesAdapter::onNewInteraction,
+                     Qt::UniqueConnection);
+
+    QObject::connect(currentConversationModel,
+                     &ConversationModel::conversationMessagesLoaded,
+                     this,
+                     &MessagesAdapter::onConversationMessagesLoaded,
+                     Qt::UniqueConnection);
+
+    QObject::connect(currentConversationModel,
+                     &ConversationModel::composingStatusChanged,
+                     this,
+                     &MessagesAdapter::onComposingStatusChanged,
+                     Qt::UniqueConnection);
+
+    QObject::connect(currentConversationModel,
+                     &ConversationModel::messagesFoundProcessed,
+                     this,
+                     &MessagesAdapter::onMessagesFoundProcessed,
+                     Qt::UniqueConnection);
+
+    mediaInteractions_.reset(new MessageListModel(&lrcInstance_->getCurrentAccountInfo(), this));
+    set_mediaMessageListModel(QVariant::fromValue(mediaInteractions_.get()));
+}
+
+void
+MessagesAdapter::sendConversationRequest()
+{
+    lrcInstance_->makeConversationPermanent();
+}
+
+void
+MessagesAdapter::sendMessage(const QString& message)
+{
+    try {
+        const auto convUid = lrcInstance_->get_selectedConvUid();
+        auto* model = lrcInstance_->getCurrentConversationModel();
+        const auto replyTarget = replyTargetFor(convUid);
+        const auto action = replyTarget.isEmpty() ? Permission::Text : Permission::TextReply;
+        if (!model || !model->isActionPermitted(convUid, action)) {
+            qWarning() << "Cannot perform action" << static_cast<int>(action) << "in conversation" << convUid
+                       << (model ? "(permission denied)" : "(conversation model unavailable)");
+            return;
+        }
+        model->sendMessage(convUid, message, replyTarget);
+    } catch (...) {
+        qDebug() << "Exception during sendMessage:" << message;
+    }
+}
+
+void
+MessagesAdapter::sendMessageToUid(const QString& message, const QString& convUid, bool inThread)
+{
+    try {
+        auto* model = lrcInstance_->getCurrentConversationModel();
+        const auto replyTarget = replyTargetFor(convUid, inThread);
+        const auto action = replyTarget.isEmpty() ? Permission::Text : Permission::TextReply;
+        if (!model || !model->isActionPermitted(convUid, action)) {
+            qWarning() << "Cannot perform action" << static_cast<int>(action) << "in conversation" << convUid
+                       << (model ? "(permission denied)" : "(conversation model unavailable)");
+            return;
+        }
+        model->sendMessage(convUid, message, replyTarget);
+    } catch (...) {
+        qDebug() << "Exception during sendMessage:" << message;
+    }
+}
+
+void
+MessagesAdapter::editMessage(const QString& convId, const QString& newBody, const QString& messageId)
+{
+    try {
+        auto editId = !messageId.isEmpty() ? messageId : editId_;
+        if (editId.isEmpty()) {
+            return;
+        }
+        set_editId("");
+        auto* model = lrcInstance_->getCurrentConversationModel();
+        // An empty body deletes the message.
+        const auto action = newBody.isEmpty() ? Permission::Delete : Permission::Edit;
+        if (!model || !model->isActionPermitted(convId, action)) {
+            qWarning() << "Cannot modify message" << editId << "in conversation" << convId
+                       << (model ? "(permission denied)" : "(conversation model unavailable)");
+            return;
+        }
+        model->editMessage(convId, newBody, editId);
+    } catch (...) {
+        qDebug() << "Exception during message edition:" << messageId;
+    }
+}
+
+void
+MessagesAdapter::removeEmojiReaction(const QString& convId, const QString& emoji, const QString& messageId)
+{
+    try {
+        auto* model = getMsgListSourceModel();
+        if (!model) {
+            qWarning() << "Unable to find message list while removing reaction from message" << messageId;
+            return;
+        }
+        const auto reactionId = model->reactionIdFor(messageId,
+                                                     lrcInstance_->getCurrentAccountInfo().profileInfo.uri,
+                                                     emoji);
+        if (reactionId.isEmpty()) {
+            qWarning() << "Unable to find reaction to remove for message" << messageId;
+            return;
+        }
+        removeReaction(convId, reactionId);
+    } catch (...) {
+        qWarning() << "Exception during removeEmojiReaction():" << messageId;
+    }
+}
+
+void
+MessagesAdapter::removeReaction(const QString& convId, const QString& reactionId)
+{
+    try {
+        auto* model = lrcInstance_->getCurrentConversationModel();
+        if (!model || !model->isActionPermitted(convId, Permission::Reaction)) {
+            qWarning() << "Cannot react in conversation" << convId
+                       << (model ? "(permission denied)" : "(conversation model unavailable)");
+            return;
+        }
+        model->removeReaction(convId, reactionId);
+    } catch (...) {
+        qWarning() << "Exception during removeReaction():" << reactionId;
+    }
+}
+
+void
+MessagesAdapter::addEmojiReaction(const QString& convId, const QString& emoji, const QString& messageId)
+{
+    try {
+        auto* model = lrcInstance_->getCurrentConversationModel();
+        if (!model || !model->isActionPermitted(convId, Permission::Reaction)) {
+            qWarning() << "Cannot react in conversation" << convId
+                       << (model ? "(permission denied)" : "(conversation model unavailable)");
+            return;
+        }
+        model->reactMessage(convId, emoji, messageId);
+    } catch (...) {
+        qDebug() << "Exception during addEmojiReaction():" << messageId;
+    }
+}
+
+void
+MessagesAdapter::sendFile(const QString& message, bool inThread)
+{
+    QFileInfo fi(message);
+    QString fileName = fi.fileName();
+    try {
+        auto convUid = lrcInstance_->get_selectedConvUid();
+        auto* model = lrcInstance_->getCurrentConversationModel();
+        const auto replyTarget = replyTargetFor(convUid, inThread);
+        const auto action = replyTarget.isEmpty() ? Permission::File : Permission::FileReply;
+        if (!model || !model->isActionPermitted(convUid, action)) {
+            qWarning() << "Cannot send file in conversation" << convUid
+                       << (model ? "(permission denied)" : "(conversation model unavailable)");
+            return;
+        }
+        model->sendFile(convUid, message, fileName, replyTarget);
+    } catch (...) {
+        qDebug() << "Exception during sendFile";
+    }
+}
+
+void
+MessagesAdapter::sendFileToUid(const QString& message, const QString& convUid)
+{
+    QFileInfo fi(message);
+    QString fileName = fi.fileName();
+    try {
+        auto* model = lrcInstance_->getCurrentConversationModel();
+        const auto replyTarget = replyTargetFor(convUid);
+        const auto action = replyTarget.isEmpty() ? Permission::File : Permission::FileReply;
+        if (!model || !model->isActionPermitted(convUid, action)) {
+            qWarning() << "Cannot send file in conversation" << convUid
+                       << (model ? "(permission denied)" : "(conversation model unavailable)");
+            return;
+        }
+        model->sendFile(convUid, message, fileName, replyTarget);
+    } catch (...) {
+        qDebug() << "Exception during sendFile";
+    }
+}
+
+void
+MessagesAdapter::joinCall(const QString& uri, const QString& deviceId, const QString& confId, bool videoMuted)
+{
+    lrcInstance_->getCurrentConversationModel()->joinCall(lrcInstance_->get_selectedConvUid(),
+                                                          uri,
+                                                          deviceId,
+                                                          confId,
+                                                          videoMuted);
+}
+
+void
+MessagesAdapter::copyToDownloads(const QString& interactionId, const QString& displayName)
+{
+    auto downloadDir = lrcInstance_->accountModel().downloadDirectory;
+    if (auto accInfo = &lrcInstance_->getCurrentAccountInfo()) {
+        auto dest = accInfo->dataTransferModel->copyTo(lrcInstance_->get_currentAccountId(),
+                                                       lrcInstance_->get_selectedConvUid(),
+                                                       interactionId,
+                                                       downloadDir,
+                                                       displayName);
+
+        QString downloadDirName = QDir(downloadDir).dirName();
+        if (!dest.isEmpty()) {
+            Q_EMIT fileCopied(displayName, downloadDirName);
+        }
+    }
+}
+
+void
+MessagesAdapter::openUrl(const QString& url)
+{
+    if (!QDesktopServices::openUrl(url)) {
+        qDebug() << "Couldn't open url: " << url;
+    }
+}
+
+void
+MessagesAdapter::openDirectory(const QString& path)
+{
+    const QUrl inputUrl(path);
+    const QString p = inputUrl.isLocalFile() ? inputUrl.toLocalFile() : path;
+    const QFileInfo f(p);
+    if (f.exists()) {
+        const QString directoryPath = f.isDir() ? f.absoluteFilePath() : f.dir().absolutePath();
+        openUrl(QUrl::fromLocalFile(QDir::cleanPath(directoryPath)).toString(QUrl::FullyEncoded));
+    }
+}
+
+void
+MessagesAdapter::removeFile(const QString& interactionId, const QString& path)
+{
+    auto convUid = lrcInstance_->get_selectedConvUid();
+    lrcInstance_->getCurrentConversationModel()->removeFile(convUid, interactionId, path);
+}
+
+void
+MessagesAdapter::acceptFile(const QString& interactionId)
+{
+    auto convUid = lrcInstance_->get_selectedConvUid();
+    lrcInstance_->getCurrentConversationModel()->acceptTransfer(convUid, interactionId);
+}
+
+void
+MessagesAdapter::cancelFile(const QString& interactionId)
+{
+    const auto convUid = lrcInstance_->get_selectedConvUid();
+    lrcInstance_->getCurrentConversationModel()->cancelTransfer(convUid, interactionId);
+}
+
+// The daemon's own ceiling on pasted images.
+constexpr qint64 MAX_PASTED_IMAGE_SIZE = 16 * 1024 * 1024;
+
+// Writes encoded image bytes to a temp file named after the detected
+// format and returns its path, or an empty string if the bytes are not a
+// readable image.
+static QString
+saveEncodedImage(const QByteArray& data)
+{
+    QBuffer buffer;
+    buffer.setData(data);
+    buffer.open(QIODevice::ReadOnly);
+    QImageReader reader(&buffer);
+    if (data.isEmpty() || !reader.canRead())
+        return {};
+    const QByteArray format = reader.format();
+    const QString ext = QString::fromLatin1(format == "jpeg" ? QByteArrayLiteral("jpg") : format);
+    QTemporaryFile file(QDir::temp().filePath("img_XXXXXX." + ext));
+    file.setAutoRemove(false);
+    if (!file.open() || file.write(data) != data.size()) {
+        qWarning() << "Unable to write pasted image to" << file.fileName();
+        return {};
+    }
+    return file.fileName();
+}
+
+// The remote image a clipboard HTML fragment consists of, if that is all it
+// is. The Windows GIF picker pastes exactly that: an <img> pointing at the
+// provider's CDN, with no image bytes alongside.
+static QUrl
+soleRemoteImage(const QMimeData* mimeData)
+{
+    if (!mimeData->hasHtml() || !mimeData->text().trimmed().isEmpty())
+        return {};
+    static const QRegularExpression imgSrc("<img[^>]*\\ssrc=[\"']([^\"']+)[\"']",
+                                           QRegularExpression::CaseInsensitiveOption);
+    const auto matches = imgSrc.globalMatch(mimeData->html());
+    QUrl url;
+    int count = 0;
+    for (const auto& m : matches) {
+        if (++count > 1)
+            return {};
+        url = QUrl(m.captured(1));
+    }
+    if (url.scheme() != "https" && url.scheme() != "http")
+        return {};
+    return url;
+}
+
+void
+MessagesAdapter::onPaste()
+{
+    const QMimeData* mimeData = QApplication::clipboard()->mimeData();
+
+    // Prefer the bytes the source already holds: a decoded QImage of a GIF
+    // is a single frame, and re-encoding a JPEG as PNG only loses.
+    static const char* const encodedTypes[] = {"image/gif", "image/png", "image/jpeg", "image/webp"};
+    for (const auto* mime : encodedTypes) {
+        if (!mimeData->hasFormat(QLatin1String(mime)))
+            continue;
+        const QString path = saveEncodedImage(mimeData->data(QLatin1String(mime)));
+        if (path.isEmpty())
+            continue;
+        Q_EMIT newFilePasted(path);
+        return;
+    }
+
+    if (const QUrl url = soleRemoteImage(mimeData); url.isValid()) {
+        network_->sendGetRequest(
+            url,
+            [self = QPointer(this)](const QByteArray& data) {
+                if (!self)
+                    return;
+                const QString path = saveEncodedImage(data);
+                if (!path.isEmpty())
+                    Q_EMIT self->newFilePasted(path);
+            },
+            MAX_PASTED_IMAGE_SIZE);
+        return;
+    }
+
+    if (mimeData->hasImage()) {
+        // Save temp data into a temp file.
+        QPixmap pixmap = qvariant_cast<QPixmap>(mimeData->imageData());
+
+        auto img_name_hash = QCryptographicHash::hash(QString::number(pixmap.cacheKey()).toLocal8Bit(),
+                                                      QCryptographicHash::Sha1);
+        QString fileName = "img_" + QString(img_name_hash.toHex()) + ".png";
+        QString path = QDir::temp().filePath(fileName);
+
+        if (!pixmap.save(path, "PNG")) {
+            qDebug().noquote() << "Errors during QPixmap save" << "\n";
+            return;
+        }
+
+        Q_EMIT newFilePasted(path);
+    } else if (mimeData->hasUrls()) {
+        const QList<QUrl> urlList = mimeData->urls();
+
+        // Attach local files; also paste text when a non-local URL is
+        // present (e.g. copied web links) so it is not dropped.
+        bool pastedLocalFile = false;
+        bool hasNonLocalUrl = false;
+        for (const QUrl& url : urlList) {
+            if (url.isLocalFile()) {
+                Q_EMIT newFilePasted(url.toLocalFile());
+                pastedLocalFile = true;
+            } else {
+                hasNonLocalUrl = true;
+            }
+        }
+        if (!pastedLocalFile || hasNonLocalUrl)
+            Q_EMIT newTextPasted();
+    } else {
+        // Treat as text content, make chatview.js handle in order to
+        // avoid string escape problems
+        Q_EMIT newTextPasted();
+    }
+}
+
+QVariantMap
+MessagesAdapter::getTransferStats(const QString& msgId, int status)
+{
+    Q_UNUSED(status)
+    auto convModel = lrcInstance_->getCurrentConversationModel();
+    lrc::api::datatransfer::Info info = {};
+    convModel->getTransferInfo(lrcInstance_->get_selectedConvUid(), msgId, info);
+    return {{"totalSize", qint64(info.totalSize)}, {"progress", qint64(info.progress)}};
+}
+
+QVariant
+MessagesAdapter::dataForInteraction(const QString& interactionId, int role) const
+{
+    if (auto* model = getMsgListSourceModel()) {
+        return model->data(interactionId, role);
+    }
+    return {};
+}
+
+void
+MessagesAdapter::userIsComposing(bool isComposing)
+{
+    if (lrcInstance_->get_selectedConvUid().isEmpty())
+        return;
+    lrcInstance_->getCurrentConversationModel()->setIsComposing(lrcInstance_->get_selectedConvUid(), isComposing);
+}
+
+void
+MessagesAdapter::onNewInteraction(const QString& convUid,
+                                  const QString& interactionId,
+                                  const interaction::Info& interaction)
+{
+    Q_UNUSED(interactionId);
+    try {
+        if (convUid.isEmpty() || convUid != lrcInstance_->get_selectedConvUid()) {
+            return;
+        }
+        auto accountId = lrcInstance_->get_currentAccountId();
+        auto& accountInfo = lrcInstance_->getAccountInfo(accountId);
+        auto& convModel = accountInfo.conversationModel;
+        convModel->clearUnreadInteractions(convUid);
+        Q_EMIT newInteraction(interactionId, static_cast<int>(interaction.type));
+    } catch (...) {
+    }
+}
+
+void
+MessagesAdapter::onMessageParsed(const QString& messageId, const QString& parsed)
+{
+    if (messageId.isEmpty()) {
+        Q_EMIT messageParsed(messageId, parsed);
+        return;
+    }
+    const QString& convId = lrcInstance_->get_selectedConvUid();
+    const QString& accId = lrcInstance_->get_currentAccountId();
+    auto& conversation = lrcInstance_->getConversationFromConvUid(convId, accId);
+    conversation.interactions->setParsedMessage(messageId, parsed);
+}
+
+void
+MessagesAdapter::onOriginalMessageParsed(const QString& messageId, const QString& parsed)
+{
+    const QString& convId = lrcInstance_->get_selectedConvUid();
+    const QString& accId = lrcInstance_->get_currentAccountId();
+    auto& conversation = lrcInstance_->getConversationFromConvUid(convId, accId);
+    conversation.interactions->setParsedOriginalBody(messageId, parsed);
+}
+
+void
+MessagesAdapter::onLinkInfoReady(const QString& messageId, const QVariantMap& info)
+{
+    const QString& convId = lrcInstance_->get_selectedConvUid();
+    const QString& accId = lrcInstance_->get_currentAccountId();
+    auto& conversation = lrcInstance_->getConversationFromConvUid(convId, accId);
+    conversation.interactions->addHyperlinkInfo(messageId, info);
+}
+
+void
+MessagesAdapter::acceptInvitation(const QString& convId)
+{
+    auto conversationId = convId.isEmpty() ? lrcInstance_->get_selectedConvUid() : convId;
+    auto* convModel = lrcInstance_->getCurrentConversationModel();
+    convModel->acceptConversationRequest(conversationId);
+}
+
+void
+MessagesAdapter::declineInvitation(const QString& convUid)
+{
+    const auto currentConvUid = convUid.isEmpty() ? lrcInstance_->get_selectedConvUid() : convUid;
+    lrcInstance_->getCurrentConversationModel()->removeConversation(currentConvUid, false);
+}
+
+void
+MessagesAdapter::blockConversation(const QString& convUid)
+{
+    const auto currentConvUid = convUid.isEmpty() ? lrcInstance_->get_selectedConvUid() : convUid;
+    lrcInstance_->getCurrentConversationModel()->removeConversation(currentConvUid, true);
+}
+
+void
+MessagesAdapter::unbanContact(int index)
+{
+    auto& accountInfo = lrcInstance_->getCurrentAccountInfo();
+    auto bannedContactList = accountInfo.contactModel->getBannedContacts();
+    auto it = bannedContactList.begin();
+    std::advance(it, index);
+
+    try {
+        auto contactInfo = accountInfo.contactModel->getContact(*it);
+        accountInfo.contactModel->addContact(contactInfo);
+    } catch (const std::out_of_range& e) {
+        qDebug() << e.what();
+    }
+}
+
+void
+MessagesAdapter::unbanConversation(const QString& convUid)
+{
+    auto& accInfo = lrcInstance_->getCurrentAccountInfo();
+    try {
+        const auto contactUri = accInfo.conversationModel->peersForConversation(convUid).at(0);
+        auto contactInfo = accInfo.contactModel->getContact(contactUri);
+        accInfo.contactModel->addContact(contactInfo);
+    } catch (const std::out_of_range& e) {
+        qDebug() << e.what();
+    }
+}
+
+void
+MessagesAdapter::clearConversationHistory(const QString& accountId, const QString& convUid)
+{
+    lrcInstance_->getAccountInfo(accountId).conversationModel->clearHistory(convUid);
+}
+
+void
+MessagesAdapter::removeConversation(const QString& convUid, bool keepContact)
+{
+    auto& accInfo = lrcInstance_->getCurrentAccountInfo();
+    accInfo.conversationModel->removeConversation(convUid, false, keepContact);
+}
+
+void
+MessagesAdapter::removeConversationMember(const QString& convUid, const QString& memberUri)
+{
+    auto& accInfo = lrcInstance_->getCurrentAccountInfo();
+    auto* model = accInfo.conversationModel.get();
+    if (!model || !model->isActionPermitted(convUid, Permission::BanUnbanMember)) {
+        qWarning() << "Cannot remove member from conversation" << convUid
+                   << (model ? "(permission denied)" : "(conversation model unavailable)");
+        return;
+    }
+    model->removeConversationMember(convUid, memberUri);
+}
+
+void
+MessagesAdapter::addConversationMember(const QString& convUid, const QString& memberUri)
+{
+    auto& accInfo = lrcInstance_->getCurrentAccountInfo();
+    auto* model = accInfo.conversationModel.get();
+    if (!model) {
+        qWarning() << "Cannot check member-addition permission: no conversation model for" << convUid;
+        return;
+    }
+    // Re-adding a banned member lifts the ban.
+    const auto memberRole = model->memberRole(convUid, memberUri);
+    const auto action = memberRole && *memberRole == member::Role::BANNED ? Permission::BanUnbanMember
+                                                                          : Permission::AddMember;
+    if (!model->isActionPermitted(convUid, action)) {
+        qWarning() << "Action" << static_cast<int>(action) << "not permitted in conversation" << convUid;
+        return;
+    }
+    model->addConversationMember(convUid, memberUri);
+}
+
+void
+MessagesAdapter::removeContact(const QString& convUid, bool banContact)
+{
+    auto& accInfo = lrcInstance_->getCurrentAccountInfo();
+
+    // remove the uri from the default moderators list
+    // TODO: seems like this should be done in libringclient
+    QStringList list = lrcInstance_->accountModel().getDefaultModerators(accInfo.id);
+    const auto contactUri = accInfo.conversationModel->peersForConversation(convUid).at(0);
+    if (!contactUri.isEmpty() && list.contains(contactUri)) {
+        lrcInstance_->accountModel().setDefaultModerator(accInfo.id, contactUri, false);
+    }
+
+    // actually remove the contact
+    accInfo.contactModel->removeContact(contactUri, banContact);
+}
+
+void
+MessagesAdapter::onConversationMessagesLoaded(uint32_t loadingRequestId, const QString& convId)
+{
+    if (convId != lrcInstance_->get_selectedConvUid())
+        return;
+    auto source = filteredMsgListModel_->sourceModel();
+    auto result = historyRequest_.finish(lrcInstance_->get_currentAccountId(),
+                                         convId,
+                                         loadingRequestId,
+                                         source ? source->rowCount() : 0);
+    if (result != HistoryRequest::Ignored) {
+        // Not "all loaded": the daemon may return nothing while another load of this conversation runs.
+        set_historyStalled(result == HistoryRequest::NoProgress);
+        const auto target = navigationTarget_;
+        if (!target.isEmpty() && !threadMsgListModel_->threadRootOf(target).isEmpty()) {
+            // Queued so the proxy's pending refilter runs first; a cancel or new jump meanwhile wins.
+            QMetaObject::invokeMethod(
+                this,
+                [this, target] {
+                    if (navigationTarget_ != target)
+                        return;
+                    set_navigationTarget({});
+                    Q_EMIT navigationTargetLoaded(target);
+                },
+                Qt::QueuedConnection);
+        } else if (!target.isEmpty() && result == HistoryRequest::NoProgress) {
+            set_navigationTarget({});
+            set_navigationFailed(true);
+        } else if (!target.isEmpty()) {
+            continueNavigation();
+        }
+    }
+    Q_EMIT moreMessagesLoaded(loadingRequestId);
+}
+
+void
+MessagesAdapter::parseMessage(
+    const QString& msgId, const QString& msg, bool showPreview, const QColor& linkColor, const QColor& backgroundColor)
+{
+    messageParser_->parseMessage(msgId, msg, showPreview, linkColor, backgroundColor);
+}
+
+void
+MessagesAdapter::parseOriginalMessage(const QString& msgId,
+                                      const QString& msg,
+                                      const QColor& linkColor,
+                                      const QColor& backgroundColor)
+{
+    messageParser_->parseOriginalMessage(msgId, msg, linkColor, backgroundColor);
+}
+
+void
+MessagesAdapter::onComposingStatusChanged(const QString& convId, const QString& contactUri, bool isComposing)
+{
+    Q_UNUSED(contactUri)
+    if (lrcInstance_->get_selectedConvUid() == convId) {
+        const QString& accId = lrcInstance_->get_currentAccountId();
+        auto& conversation = lrcInstance_->getConversationFromConvUid(convId, accId);
+        set_currentConvComposingList(conversationTypersUrlToName(conversation.typers));
+    }
+}
+
+void
+MessagesAdapter::onMessagesFoundProcessed(const QString& accountId,
+                                          const QMap<QString, interaction::Info>& messageInformation)
+{
+    if (lrcInstance_->get_currentAccountId() != accountId) {
+        return;
+    }
+
+    bool isSearchInProgress = messageInformation.size();
+    if (isSearchInProgress) {
+        for (auto it = messageInformation.begin(); it != messageInformation.end(); it++) {
+            mediaInteractions_->append(it.key(), it.value());
+        }
+    } else {
+        set_mediaMessageListModel(QVariant::fromValue(mediaInteractions_.get()));
+    }
+}
+
+QList<QString>
+MessagesAdapter::conversationTypersUrlToName(const QSet<QString>& typersSet)
+{
+    QList<QString> nameList;
+    for (const auto& id : typersSet) {
+        auto name = lrcInstance_->getCurrentContactModel()->bestNameForContact(id);
+        nameList.append(name);
+    }
+
+    return nameList;
+}
+
+QVariantMap
+MessagesAdapter::isLocalImage(const QString& mimename)
+{
+    if (mimename.startsWith("image/")) {
+        QString fileFormat = mimename;
+
+        QImageReader reader;
+        QList<QByteArray> supportedFormats = reader.supportedMimeTypes();
+        auto iterator = std::find_if(supportedFormats.begin(),
+                                     supportedFormats.end(),
+                                     [fileFormat](const QByteArray& format) { return format == fileFormat; });
+        if (iterator != supportedFormats.end() && *iterator == "image/gif") {
+            return {{"isAnimatedImage", true}};
+        }
+        return {{"isImage", iterator != supportedFormats.end()}};
+    }
+    return {{"isImage", false}};
+}
+
+QVariantMap
+MessagesAdapter::getMediaInfo(const QString& msg)
+{
+    auto filePath = QFileInfo(msg).absoluteFilePath();
+    static const QString html = "<body style='margin:0;padding:0;'>"
+                                "<%1 style='width:100%;height:%2;outline:none;background-color:#f1f3f4;"
+                                "object-fit:cover;' "
+                                "controls controlsList='nodownload noplaybackrate' src='file://%3' type='%4'/></body>";
+    QMimeDatabase db;
+    QMimeType mime = db.mimeTypeForFile(filePath);
+    QVariantMap fileInfo = isLocalImage(mime.name());
+    if (fileInfo["isImage"].toBool() || fileInfo["isAnimatedImage"].toBool()) {
+        return fileInfo;
+    }
+    static const QRegularExpression vPattern("(video/)(avi|mov|webm|webp|rmvb)$",
+                                             QRegularExpression::CaseInsensitiveOption);
+    auto match = vPattern.match(mime.name());
+    auto captured = match.capturedTexts();
+    QString type = captured.size() == 3 ? captured[1] : "";
+    if (!type.isEmpty()) {
+        return {
+            {"isVideo", true},
+            {"isAudio", false},
+            {"html", html.arg("video", "100%", filePath, mime.name())},
+        };
+    } else if (mime.name().startsWith("video/")) {
+        // The web engine can't play it, so it's shown as a thumbnail.
+        return {
+            {"isVideo", true},
+            {"isAudio", false},
+        };
+    } else {
+        static const QRegularExpression aPattern("(audio/)(ogg|flac|wav|mpeg|mp3)$",
+                                                 QRegularExpression::CaseInsensitiveOption);
+        match = aPattern.match(mime.name());
+        captured = match.capturedTexts();
+        type = captured.size() == 3 ? captured[1] : "";
+        if (!type.isEmpty()) {
+            return {
+                {"isVideo", false},
+                {"isAudio", true},
+                {"html", html.arg("audio", "54px", filePath, mime.name())},
+            };
+        }
+    }
+    return {};
+}
+
+bool
+MessagesAdapter::isRemoteImage(const QString& msg)
+{
+    // TODO: test if all these open in the AnimatedImage component
+    const static QRegularExpression imageRe("[^\\s]+(.*?)\\.(jpg|jpeg|png|gif|apng|webp|avif|flif)$",
+                                            QRegularExpression::CaseInsensitiveOption);
+    QRegularExpressionMatch match = imageRe.match(msg);
+    return match.hasMatch();
+}
+
+QString
+MessagesAdapter::getFormattedTime(const quint64 timestamp)
+{
+    const auto currentTime = QDateTime::currentDateTime();
+    const auto seconds = currentTime.toSecsSinceEpoch() - timestamp;
+    if (seconds > 60) {
+        auto curTime = QDateTime::fromSecsSinceEpoch(timestamp).time();
+        return curLocale_.toString(curTime, curLocale_.ShortFormat).toLower();
+    }
+    return QObject::tr("Just now");
+}
+
+QString
+MessagesAdapter::getBestFormattedDate(const quint64 timestamp)
+{
+    auto currentDate = QDate::currentDate();
+    auto timestampDate = QDateTime::fromSecsSinceEpoch(timestamp).date();
+    if (timestampDate == currentDate)
+        return getFormattedTime(timestamp);
+    return getFormattedDay(timestamp);
+}
+
+void
+MessagesAdapter::updateDateFormats()
+{
+    // Derive the preferred field order from the LongFormat (e.g., "Sunday, 5 October 2025").
+    // This avoids issues with ShortFormat reflecting numeric preferences (like ISO in English)
+    // rather than the cultural text convention.
+    QString pattern = curLocale_.dateFormat(QLocale::LongFormat);
+
+    // Remove Day-Of-Week tokens to avoid counting 'd' from 'dddd' as the day of month position.
+    // We remove "dddd" first, then "ddd" to handle longest match.
+    pattern.remove("dddd");
+    pattern.remove("ddd");
+
+    int idxY = pattern.indexOf('y');
+    int idxM = pattern.indexOf('M');
+    int idxD = pattern.indexOf('d');
+
+    if (idxY != -1 && idxY < idxM && idxY < idxD) {
+        // Year first (e.g. CJK, Hungarian)
+        dateFormatCurrentYear_ = "MMM d";
+        dateFormatOtherYears_ = "yyyy MMM d";
+    } else if (idxD != -1 && idxM != -1 && idxD < idxM) {
+        // Day before Month (e.g. European, Persian)
+        dateFormatCurrentYear_ = "d MMM";
+        dateFormatOtherYears_ = "d MMM yyyy";
+    } else {
+        // Month before Day (e.g. US)
+        dateFormatCurrentYear_ = "MMM d";
+        dateFormatOtherYears_ = "MMM d, yyyy";
+    }
+}
+
+QString
+MessagesAdapter::getFormattedDay(const quint64 timestamp)
+{
+    auto currentDate = QDate::currentDate();
+    auto timestampDate = QDateTime::fromSecsSinceEpoch(timestamp).date();
+    if (timestampDate == currentDate)
+        return QObject::tr("Today");
+
+    auto daysDiff = timestampDate.daysTo(currentDate);
+    if (daysDiff == 1)
+        return QObject::tr("Yesterday");
+
+    if (daysDiff < 7 && daysDiff > 0)
+        return curLocale_.dayName(timestampDate.dayOfWeek());
+
+    if (timestampDate.year() == currentDate.year())
+        return curLocale_.toString(timestampDate, dateFormatCurrentYear_);
+    return curLocale_.toString(timestampDate, dateFormatOtherYears_);
+}
+
+void
+MessagesAdapter::startSearch(const QString& text, bool isMedia)
+{
+    auto accountId = lrcInstance_->get_currentAccountId();
+    mediaInteractions_.reset(new MessageListModel(&lrcInstance_->getCurrentAccountInfo(), this));
+    set_mediaMessageListModel(QVariant::fromValue(mediaInteractions_.get()));
+
+    if (text.isEmpty() && !isMedia)
+        return;
+
+    auto convId = lrcInstance_->get_selectedConvUid();
+
+    try {
+        lrcInstance_->getCurrentConversationModel()->getConvMediasInfos(accountId, convId, text, isMedia);
+    } catch (...) {
+        qDebug() << "Exception during startSearch()";
+    }
+}
+
+MessageListModel*
+MessagesAdapter::getMsgListSourceModel() const
+{
+    // We are certain that filteredMsgListModel_'s source model is a MessageListModel,
+    // However it may be a nullptr if not yet set.
+    return static_cast<MessageListModel*>(filteredMsgListModel_->sourceModel());
+}
