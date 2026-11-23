@@ -95,6 +95,16 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path x64/Release/Subarashi.exe)) { throw "Subarashi.exe não foi gerado" }
+          # Runtime do Visual C++ junto do .exe, para abrir em Windows sem o
+          # "Visual C++ Redistributable" instalado.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT" -Directory | Sort-Object FullName | Select-Object -Last 1
+          if (-not $crt) { throw "Runtime do Visual C++ não encontrado" }
+          echo "Copiando runtime de $($crt.FullName)"
+          Copy-Item "$($crt.FullName)\*.dll" x64/Release/ -Force
+          foreach ($dll in "vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll") {
+            if (-not (Test-Path "x64/Release/$dll")) { throw "Faltou $dll no pacote" }
+          }
           Copy-Item LEIA-ME-SUBARASHI.md x64/Release/
           Copy-Item COPYING x64/Release/LICENCA-GPLv3.txt -ErrorAction SilentlyContinue
           Compress-Archive -Path x64/Release/* -DestinationPath Subarashi-windows-x64.zip -Force
