@@ -62,7 +62,7 @@ jobs:
             "QT_ROOT_DIR=$root" | Out-File -Append $env:GITHUB_ENV
             echo "Qt já em cache: $root"
           } else {
-            python .github/scripts/install_qt.py 6.12.1 D:\Qt qtbase qtdeclarative qtsvg qttools qttranslations qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
+            python .github/scripts/install_qt.py 6.12.1 D:\Qt qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
             Get-Content $env:GITHUB_ENV | Select-String QT_ROOT_DIR
             ((Get-Content $env:GITHUB_ENV | Select-String "QT_ROOT_DIR=" | Select-Object -Last 1).ToString() -replace "QT_ROOT_DIR=","") | Out-File -Encoding ascii D:\Qt\qt-root.txt
           }

@@ -4,11 +4,11 @@ jobs:
   d:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
-      - shell: pwsh
+      - shell: bash
         run: |
-          python .github/scripts/install_qt.py 6.12.1 D:\Qt qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
-          Get-ChildItem D:\Qt -Depth 1
-          $root = (Get-Content $env:GITHUB_ENV | Select-String "QT_ROOT_DIR=" | Select-Object -Last 1).ToString() -replace "QT_ROOT_DIR=",""
-          & "$root\bin\qtpaths.exe" --qt-query | Select-Object -First 8
-          Get-ChildItem "$root\lib\cmake" -Name | Select-String "WebEngine|Multimedia|HttpServer|Core5Compat|Positioning|WebSockets|Svg|Quick$"
+          B=https://download.qt.io/online/qtsdkrepository/windows_x86
+          ls_() { curl -sL "$1/" | grep -o 'href="[^"?/][^"]*"' | grep -v -E 'static|mirrorbrain|apache' ; }
+          echo "== extensions"; ls_ $B/extensions
+          echo "== extensions/qtwebengine"; ls_ $B/extensions/qtwebengine | tail -12
+          for v in 6121 612 6120; do echo "== qtwebengine/$v"; ls_ $B/extensions/qtwebengine/$v; done
+          echo "== desktop/qt6_612"; ls_ $B/desktop/qt6_612 | head -30
