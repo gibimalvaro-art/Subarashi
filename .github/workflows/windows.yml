@@ -27,6 +27,7 @@ jobs:
       JENKINS_URL: "github-actions"
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-cache,readwrite"
       VCPKG_DISABLE_METRICS: "1"
+      PYTHONIOENCODING: "utf-8"
       # O vcpkg que já vem no Windows do GitHub não tem a versão fixada pelo
       # Jami; vazio faz o script baixar a versão certa.
       VCPKG_ROOT: ""
