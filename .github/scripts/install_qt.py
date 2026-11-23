@@ -51,18 +51,23 @@ def main():
     pkgs = {}
     pkgs.update(read_repo(f"{BASE}/desktop/qt6_{vs}/qt6_{vs}_{SHORT}"))
     # Desde a 6.11, o QtWebEngine fica em all_os/extensions/qtwebengine/<versão>/,
-    # com uma subpasta por plataforma. Descobre a da MSVC 64 bits pela listagem.
-    if "qtwebengine" in modules:
-        ext_base = f"{ALL_OS}/extensions/qtwebengine/{vs}"
-        listing = fetch(ext_base + "/").decode("utf-8", "replace")
-        subdirs = sorted(set(re.findall(r'href="([^"?/][^"]*)/"', listing)))
-        print("subpastas do QtWebEngine:", subdirs)
-        for sub in subdirs:
+    # com subpastas (versão do Chromium, depois plataforma). Desce pela
+    # listagem até achar a pasta da MSVC 64 bits.
+    def subdirs(url):
+        listing = fetch(url + "/").decode("utf-8", "replace")
+        return sorted(set(d for d in re.findall(r'href="([^"?/:][^"]*)/"', listing)
+                          if "src_doc" not in d))
+
+    def discover(url, depth):
+        for sub in subdirs(url):
             if SHORT in sub and "arm64" not in sub:
-                pkgs.update(read_repo(f"{ext_base}/{sub}"))
-        if not any("webengine" in n for n in pkgs):
-            for sub in subdirs:
-                pkgs.update(read_repo(f"{ext_base}/{sub}"))
+                pkgs.update(read_repo(f"{url}/{sub}"))
+            elif depth > 0 and re.fullmatch(r"\d+", sub):
+                discover(f"{url}/{sub}", depth - 1)
+
+    if "qtwebengine" in modules:
+        discover(f"{ALL_OS}/extensions/qtwebengine/{vs}", 2)
+
     if not pkgs:
         raise SystemExit("Nenhum índice do Qt encontrado")
 
