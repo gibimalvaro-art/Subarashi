@@ -51,7 +51,25 @@ def main():
     version, outdir, modules = sys.argv[1], sys.argv[2], sys.argv[3:]
     vs = version.replace(".", "")
     pkgs = {}
-    pkgs.update(read_repo(f"{BASE}/desktop/qt6_{vs}/qt6_{vs}_{SHORT}"))
+    # Windows: qt6_6120/qt6_6120_msvc2022_64. No Mac o nome da subpasta varia,
+    # então tenta os conhecidos e depois as subpastas listadas.
+    top = f"{BASE}/desktop/qt6_{vs}"
+    candidates = [f"qt6_{vs}_{SHORT}", f"qt6_{vs}"]
+    try:
+        listing = fetch(top + "/").decode("utf-8", "replace")
+        candidates += sorted(set(d for d in re.findall(r'href="([^"?/:][^"]*)/"', listing)
+                                 if d.startswith(f"qt6_{vs}") and d not in candidates))
+    except SystemExit:
+        pass
+    for cand in candidates:
+        found = read_repo(f"{top}/{cand}")
+        if f"qt.qt6.{vs}.{ARCH}" in found:
+            pkgs.update(found)
+            # módulos extras podem estar em pastas irmãs (ex.: _qt5compat)
+            for extra in candidates:
+                if extra != cand and extra.startswith(cand):
+                    pkgs.update(read_repo(f"{top}/{extra}"))
+            break
     # Desde a 6.11, o QtWebEngine fica em all_os/extensions/qtwebengine/<versão>/,
     # com subpastas (versão do Chromium, depois plataforma). Desce pela
     # listagem até achar a pasta da MSVC 64 bits.
