@@ -13,7 +13,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
 	<key>CFBundleName</key>
-	<string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+	<string>Subarashi</string>
+	<key>CFBundleDisplayName</key>
+	<string>Subarashi</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -35,14 +37,14 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Jami requires to access your camera to make calls and record video</string>
+	<string>O Subarashi precisa da câmera para fazer chamadas de vídeo e gravar vídeos.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Jami requires to access your microphone to make calls and record audio</string>
+	<string>O Subarashi precisa do microfone para fazer chamadas e gravar áudio.</string>
 	<key>NSLocationUsageDescription</key>
-	<string>Allow Jami to access your location so you can share your current location with your contacts.</string>
+	<string>Permita que o Subarashi acesse sua localização para compartilhá-la com seus contatos.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Jami requires to monitor global key events for push-to-talk functionality.</string>
+    <string>O Subarashi precisa monitorar o teclado para a função de apertar para falar.</string>
 </dict>
 </plist>

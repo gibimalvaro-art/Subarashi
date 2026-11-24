@@ -56,6 +56,19 @@ No GitHub deste projeto: aba **Actions** > **Compilar Subarashi para Windows** >
 o programa é desconhecido (não tem assinatura digital): "Mais informações" >
 "Executar assim mesmo".
 
+## Baixar o programa pronto (Mac)
+
+Na aba **Actions**, rode **Compilar Subarashi para macOS**. O
+`Subarashi-macos-arm64.dmg` aparece na aba **Releases**. Ele serve para Macs
+com chip Apple (M1 em diante) e macOS 14.4 ou mais novo.
+
+1. Abra o `.dmg` e arraste o **Subarashi** para **Aplicativos**.
+2. Abra o Subarashi. O macOS vai bloquear, porque o app não é assinado pela
+   Apple (para isso seria preciso a conta paga de desenvolvedor).
+3. Vá em **Ajustes do Sistema** > **Privacidade e Segurança**, role até o aviso
+   sobre o Subarashi e clique em **Abrir Mesmo Assim**. Confirme com sua senha.
+   Isso só é preciso na primeira vez.
+
 ## Como compilar no próprio computador
 
 Resumo do `INSTALL.md` (leia o original para os detalhes). É demorado: o núcleo
