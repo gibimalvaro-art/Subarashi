@@ -62,6 +62,12 @@ Na aba **Actions**, rode **Compilar Subarashi para macOS**. O
 `Subarashi-macos-arm64.dmg` aparece na aba **Releases**. Ele serve para Macs
 com chip Apple (M1 em diante) e macOS 14.4 ou mais novo.
 
+Para Mac com processador Intel e para **Hackintosh** (Intel ou AMD Ryzen), use
+**Compilar Subarashi para macOS Intel (Hackintosh)**, que gera o
+`Subarashi-macos-intel.dmg`. Também exige macOS 14.4 ou mais novo. Em
+Hackintosh com AMD, a aceleração de vídeo por hardware pode não existir; nesse
+caso o vídeo é codificado pelo processador, o que funciona, mas esquenta mais.
+
 1. Abra o `.dmg` e arraste o **Subarashi** para **Aplicativos**.
 2. Abra o Subarashi. O macOS vai bloquear, porque o app não é assinado pela
    Apple (para isso seria preciso a conta paga de desenvolvedor).

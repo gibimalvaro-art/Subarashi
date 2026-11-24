@@ -8,10 +8,12 @@ Uso: python install_qt.py 6.12.1 D:\\Qt modulo1 modulo2 ...
 """
 import os, re, subprocess, sys, urllib.request, xml.etree.ElementTree as ET
 
-BASE = "https://download.qt.io/online/qtsdkrepository/windows_x86"
+HOST = os.environ.get("QT_HOST", "windows_x86")          # mac_x64 no Mac
+BASE = f"https://download.qt.io/online/qtsdkrepository/{HOST}"
 ALL_OS = "https://download.qt.io/online/qtsdkrepository/all_os"
-ARCH = "win64_msvc2022_64"
-SHORT = "msvc2022_64"
+ARCH = os.environ.get("QT_ARCH", "win64_msvc2022_64")    # clang_64 no Mac
+SHORT = os.environ.get("QT_SHORT", "msvc2022_64")        # clang_64 no Mac
+SEVENZIP = os.environ.get("SEVENZIP", "7z")
 
 
 def fetch(url: str) -> bytes:
@@ -104,16 +106,16 @@ def main():
             print(f"baixando {n}: {arc}")
             with open(dest, "wb") as f:
                 f.write(fetch(url))
-            subprocess.run(["7z", "x", "-y", "-bso0", "-bsp0", f"-o{outdir}", dest], check=True)
+            subprocess.run([SEVENZIP, "x", "-y", "-bso0", "-bsp0", f"-o{outdir}", dest], check=True)
             os.remove(dest)
 
     core = None
-    for root, _dirs, files in os.walk(outdir):
-        if "Qt6Core.dll" in files and root.endswith("bin"):
-            core = os.path.dirname(root)
+    for root, dirs, _files in os.walk(outdir):
+        if root.endswith(os.path.join("lib", "cmake")) and "Qt6Core" in dirs:
+            core = os.path.dirname(os.path.dirname(root))
             break
     if not core:
-        raise SystemExit("Qt6Core.dll não apareceu depois da extração")
+        raise SystemExit("O Qt6Core não apareceu depois da extração")
     print("Qt instalado em", core)
     with open(os.environ.get("GITHUB_ENV", os.devnull), "a", encoding="utf-8") as env:
         env.write(f"QT_ROOT_DIR={core}\n")

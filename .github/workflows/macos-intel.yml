@@ -1,0 +1,150 @@
+# Subarashi: compila o app para Mac com processador Intel/AMD (x86_64), o que
+# inclui Hackintosh (por exemplo, com Ryzen), nos computadores Intel do GitHub.
+#
+# O Homebrew não publica mais o Qt pronto para Intel, então o Qt 6.12 vem do
+# repositório oficial do Qt (.github/scripts/install_qt.py).
+#
+# Como usar: aba "Actions" > "Compilar Subarashi para macOS" > "Run workflow".
+# A primeira vez é longa (as bibliotecas do núcleo do Jami são compiladas do
+# zero). Elas ficam guardadas em cache para as próximas vezes.
+#
+# Resultado: um .dmg com o Subarashi.app, publicado na aba "Releases".
+# O app não é assinado pela Apple (exigiria conta paga de desenvolvedor), então
+# o macOS pede uma liberação manual na primeira abertura (veja o LEIA-ME).
+
+name: Compilar Subarashi para macOS Intel (Hackintosh)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 355
+    env:
+      TARBALLS: ${{ github.workspace }}/tarballs
+      CONFIGURE_FLAGS: --without-dbus
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+    steps:
+      - name: Baixar o código (com o núcleo do Jami)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restaurar bibliotecas já compiladas
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            tarballs
+            daemon/contrib/*-apple-darwin*
+            daemon/contrib/build-*-apple-darwin*
+          key: contrib-macos-x64-${{ hashFiles('daemon/contrib/src/**') }}-${{ github.run_id }}
+          restore-keys: |
+            contrib-macos-x64-${{ hashFiles('daemon/contrib/src/**') }}-
+            contrib-macos-x64-
+
+      - name: Ferramentas de compilação (Homebrew)
+        run: |
+          brew install autoconf automake libtool pkg-config yasm nasm ninja gettext sevenzip || \
+          brew install autoconf automake libtool pkg-config yasm nasm ninja gettext p7zip
+          command -v 7zz || command -v 7z
+          cmake --version
+          if ! command -v cargo >/dev/null; then brew install rust; fi
+          cargo --version
+
+      - name: Qt guardado de execuções anteriores
+        uses: actions/cache@v4
+        with:
+          path: ~/Qt
+          key: qt-6.12.0-mac-clang_64-v1-${{ hashFiles('.github/scripts/install_qt.py') }}
+
+      - name: Instalar o Qt 6.12 (repositório oficial do Qt)
+        env:
+          QT_HOST: mac_x64
+          QT_ARCH: clang_64
+          QT_SHORT: clang_64
+        run: |
+          if [ -f ~/Qt/qt-root.txt ]; then
+            echo "QT_ROOT_DIR=$(cat ~/Qt/qt-root.txt)" >> "$GITHUB_ENV"
+          else
+            export SEVENZIP=$(command -v 7zz || command -v 7z)
+            python3 .github/scripts/install_qt.py 6.12.0 ~/Qt qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
+            grep QT_ROOT_DIR "$GITHUB_ENV" | tail -1 | cut -d= -f2- > ~/Qt/qt-root.txt
+          fi
+          cat ~/Qt/qt-root.txt
+          ls "$(cat ~/Qt/qt-root.txt)/bin" | grep -E "macdeployqt|qtpaths"
+          lipo -info "$(cat ~/Qt/qt-root.txt)/lib/QtCore.framework/QtCore"
+
+      - name: Configurar (compila as bibliotecas do núcleo na primeira vez)
+        timeout-minutes: 300
+        run: |
+          mkdir -p "$TARBALLS"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DWITH_DAEMON_SUBMODULE=ON \
+            -DENABLE_CRASHREPORTS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DPROJ_NAME=Jami \
+            -DBUNDLE_ID=io.github.gibimalvaro-art.subarashi \
+            -DPROJ_COPYRIGHT="GPLv3. Baseado no Jami, Savoir-faire Linux." \
+            -DJAMI_VERSION=1.0 -DJAMI_BUILD=${{ github.run_number }}
+
+      - name: Guardar bibliotecas compiladas (mesmo se falhar)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            tarballs
+            daemon/contrib/*-apple-darwin*
+            daemon/contrib/build-*-apple-darwin*
+          key: contrib-macos-x64-${{ hashFiles('daemon/contrib/src/**') }}-${{ github.run_id }}
+
+      - name: Compilar
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)"
+
+      - name: Montar o Subarashi.app
+        run: |
+          APP=$(find build -maxdepth 2 -name "*.app" -type d | head -1)
+          [ -n "$APP" ] || { echo "Nenhum .app gerado"; exit 1; }
+          echo "App gerado: $APP"
+          rm -rf dist && mkdir dist
+          cp -R "$APP" dist/Subarashi.app
+          "$QT_ROOT_DIR/bin/macdeployqt" dist/Subarashi.app -qmldir=src/app -verbose=1
+          # Assinatura "ad hoc" (sem conta Apple).
+          codesign --force --deep --sign - dist/Subarashi.app
+          codesign --verify --deep --verbose=2 dist/Subarashi.app
+          /usr/libexec/PlistBuddy -c "Print :CFBundleName" dist/Subarashi.app/Contents/Info.plist
+          du -sh dist/Subarashi.app
+
+      - name: Gerar o .dmg
+        run: |
+          mkdir -p dmg && cp -R dist/Subarashi.app dmg/ && ln -s /Applications dmg/Applications
+          cp LEIA-ME-SUBARASHI.md dmg/ && cp COPYING dmg/LICENCA-GPLv3.txt
+          hdiutil create -volname Subarashi -srcfolder dmg -ov -format UDZO Subarashi-macos-intel.dmg
+          ls -la Subarashi-macos-intel.dmg
+
+      - name: Guardar o .dmg nesta execução
+        uses: actions/upload-artifact@v4
+        with:
+          name: Subarashi-macos-intel
+          path: Subarashi-macos-intel.dmg
+
+      - name: Publicar na aba Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: macos-intel-${{ github.run_number }}
+          name: Subarashi para Mac Intel/Hackintosh (compilação ${{ github.run_number }})
+          body: |
+            Para Macs com processador Intel e Hackintosh (Intel ou AMD Ryzen), macOS 14.4 ou mais novo.
+            Abra o `Subarashi-macos-intel.dmg` e arraste o Subarashi para Aplicativos.
+            Na primeira abertura o macOS bloqueia (o app não é assinado pela Apple):
+            Ajustes do Sistema > Privacidade e Segurança > "Abrir Mesmo Assim".
+            Não instale junto com o Jami oficial no mesmo Mac.
+          files: Subarashi-macos-intel.dmg
