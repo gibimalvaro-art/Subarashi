@@ -54,6 +54,16 @@ jobs:
           if ! command -v cargo >/dev/null; then brew install rust; fi
           cargo --version
 
+      - name: Ajustes no núcleo para o Mac
+        run: |
+          # O minizip baixa o zstd na configuração, e o zstd atual conflita com o
+          # CMake 4.x dos Macs do GitHub (export set duplicado). O Jami não lê
+          # zips com zstd, então o codec é desligado, como o próprio Jami já faz
+          # com o bzip2.
+          f=daemon/contrib/src/minizip/rules.mak
+          grep -q "MZ_ZSTD" "$f" || perl -0pi -e 's/(-DMZ_BZIP2=OFF \\\n)/$1\t\t-DMZ_ZSTD=OFF \\\n/' "$f"
+          grep -n "MZ_" "$f"
+
       - name: Configurar (compila as bibliotecas do núcleo na primeira vez)
         timeout-minutes: 300
         run: |
