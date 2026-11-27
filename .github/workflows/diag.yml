@@ -1,0 +1,37 @@
+name: diagnostico-qt
+on: workflow_dispatch
+jobs:
+  d:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        base: ["6.12.0", "6.12.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+          QT_WEBENGINE_VERSION: "6.12.0"
+        run: |
+          python .github/scripts/install_qt.py ${{ matrix.base }} D:\Qt qtpositioning qtwebengine qtwebchannel
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -m pip install -q pefile
+          python -c @"
+          import pefile,struct,os
+          def exports(path):
+              pe=pefile.PE(path,fast_load=True); d=pe.OPTIONAL_HEADER.DATA_DIRECTORY[0]; raw=pe.__data__
+              off=pe.get_offset_from_rva(d.VirtualAddress); n=struct.unpack_from('<I',raw,off+24)[0]; o=pe.get_offset_from_rva(struct.unpack_from('<I',raw,off+32)[0]); s=set()
+              for i in range(n):
+                  no=pe.get_offset_from_rva(struct.unpack_from('<I',raw,o+4*i)[0]); s.add(raw[no:raw.find(b'\0',no)].decode('latin1'))
+              return s
+          b=r'D:\Qt\bin'
+          g=exports(os.path.join(b,'Qt6Gui.dll'))
+          pe=pefile.PE(os.path.join(b,'Qt6WebEngineCore.dll'),fast_load=True); pe.parse_data_directories([pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']])
+          for imp in pe.DIRECTORY_ENTRY_IMPORT:
+              d=imp.dll.decode()
+              if d.lower().startswith('qt6') and os.path.exists(os.path.join(b,d)):
+                  e=g if d=='Qt6Gui.dll' else exports(os.path.join(b,d))
+                  miss=[i.name.decode() for i in imp.imports if i.name and i.name.decode() not in e]
+                  print('RESULTADO', d, 'faltando:', len(miss), miss[:3])
+          "@

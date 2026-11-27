@@ -86,14 +86,18 @@ def main():
                 discover(f"{url}/{sub}", depth - 1)
 
     if "qtwebengine" in modules:
-        # Binários do Windows: windows_x86/extensions/qtwebengine/<versão>/...
-        discover(f"{BASE}/extensions/qtwebengine/{vs}", 2)
+        # Binários: <host>/extensions/qtwebengine/<versão>/... A versão do
+        # WebEngine pode ser diferente da base (QT_WEBENGINE_VERSION), porque
+        # o Qt publica o WebEngine com atraso em relação às versões de correção.
+        wv = os.environ.get("QT_WEBENGINE_VERSION", version).replace(".", "")
+        discover(f"{BASE}/extensions/qtwebengine/{wv}", 2)
 
     if not pkgs:
         raise SystemExit("Nenhum índice do Qt encontrado")
 
     def find(mod):
-        pat = re.compile(rf"^(qt\.qt6\.{vs}\.(addons\.)?|extensions\.){re.escape(mod)}(\.{vs})?\.{ARCH}$")
+        wv = os.environ.get("QT_WEBENGINE_VERSION", version).replace(".", "")
+        pat = re.compile(rf"^(qt\.qt6\.{vs}\.(addons\.)?|extensions\.){re.escape(mod)}(\.({vs}|{wv}))?\.{ARCH}$")
         hits = [n for n in pkgs if pat.match(n)]
         return hits
 
