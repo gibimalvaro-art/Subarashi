@@ -83,6 +83,27 @@ caso o vídeo é codificado pelo processador, o que funciona, mas esquenta mais.
    sobre o Subarashi e clique em **Abrir Mesmo Assim**. Confirme com sua senha.
    Isso só é preciso na primeira vez.
 
+## iPhone (conta Apple gratuita)
+
+Na aba **Actions**, rode **Compilar Subarashi para iPhone**. O
+`Subarashi-iphone.ipa` aparece na aba **Releases**. Ele vem **sem assinatura**:
+quem assina é você, com a sua conta Apple gratuita, na hora de instalar.
+
+Limites da conta gratuita: o app vale **7 dias** (depois, é só reinstalar pelo
+mesmo caminho) e **não recebe notificações** (chamadas e mensagens só chegam
+com o app aberto). As extensões de notificação e de "Compartilhar" foram
+retiradas, porque exigem conta paga.
+
+Instalação (uma vez por semana):
+1. No computador (Windows ou Mac), instale o **Sideloadly**.
+2. Ligue o iPhone no computador pelo cabo e confie no computador.
+3. No Sideloadly, arraste o `Subarashi-iphone.ipa`, informe o seu Apple ID e
+   clique em **Start**.
+4. No iPhone: **Ajustes > Privacidade e Segurança > Modo de Desenvolvedor**,
+   ligue e reinicie (só na primeira vez).
+5. **Ajustes > Geral > VPN e Gerenciamento de Dispositivos**: toque no seu
+   Apple ID e em **Confiar**.
+
 ## Como compilar no próprio computador
 
 Resumo do `INSTALL.md` (leia o original para os detalhes). É demorado: o núcleo

@@ -1,0 +1,146 @@
+# Subarashi para iPhone: compila o app de iPhone do Jami (jami-client-ios) com a
+# marca Subarashi, nos Macs do GitHub, SEM assinatura.
+#
+# O .ipa gerado é instalado no iPhone com a conta Apple gratuita, por um
+# instalador como o Sideloadly (Windows/Mac), que assina o app com a sua conta.
+# Com conta gratuita o app vale 7 dias (reinstalar depois) e não recebe
+# notificações: chamadas e mensagens só chegam com o app aberto.
+#
+# Como usar: aba "Actions" > "Compilar Subarashi para iPhone" > "Run workflow".
+
+name: Compilar Subarashi para iPhone
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Versão do app de iPhone do Jami usada como base (26/11/2026).
+  JAMI_IOS_COMMIT: ab5ebbb2cb408e8f6309cc9f9a2b6991332711f8
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 355
+
+    steps:
+      - name: Baixar o projeto Subarashi
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          path: subarashi
+
+      - name: Baixar o app de iPhone do Jami (com o núcleo)
+        run: |
+          # O núcleo aponta para review.jami.net; o espelho do GitHub é o mesmo código.
+          git config --global url."https://github.com/savoirfairelinux/jami-daemon".insteadOf "https://review.jami.net/jami-daemon"
+          git clone https://github.com/savoirfairelinux/jami-client-ios jami-ios
+          cd jami-ios
+          git checkout "$JAMI_IOS_COMMIT"
+          git submodule update --init --depth 50 daemon || git submodule update --init daemon
+          git -C daemon log -1 --format='núcleo: %h %cd'
+
+      - name: Escolher o Xcode mais novo
+        run: |
+          ls -d /Applications/Xcode*.app
+          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X"
+          xcodebuild -version
+
+      - name: Ferramentas (Homebrew)
+        run: |
+          brew install autoconf automake libtool pkg-config yasm nasm gettext carthage node || true
+          for t in autoconf automake libtool pkg-config carthage node npm; do command -v $t >/dev/null || { echo "Faltou $t"; exit 1; }; done
+          cmake --version
+
+      - name: Restaurar bibliotecas já compiladas
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            contrib-cache
+            jami-ios/Ring/Carthage
+          key: ios-${{ env.JAMI_IOS_COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            ios-${{ env.JAMI_IOS_COMMIT }}-
+            ios-
+
+      - name: Ajustes no núcleo
+        working-directory: jami-ios
+        run: |
+          # Mesmo ajuste do Mac: o zstd baixado pelo minizip conflita com o CMake 4.x.
+          f=daemon/contrib/src/minizip/rules.mak
+          grep -q "MZ_ZSTD" "$f" || perl -0pi -e 's/(-DMZ_BZIP2=OFF \\\n)/$1\t\t-DMZ_ZSTD=OFF \\\n/' "$f"
+          grep -n "MZ_" "$f"
+
+      - name: Compilar o núcleo do Jami para iPhone
+        working-directory: jami-ios
+        timeout-minutes: 300
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/contrib-cache"
+          export CACHE_DIR="$GITHUB_WORKSPACE/contrib-cache"
+          bash ./compile-ios.sh --platform=iPhoneOS --release
+          ls xcframework
+
+      - name: Guardar bibliotecas compiladas (mesmo se falhar)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            contrib-cache
+            jami-ios/Ring/Carthage
+          key: ios-${{ env.JAMI_IOS_COMMIT }}-${{ github.run_id }}
+
+      - name: Dependências do app (Carthage)
+        working-directory: jami-ios/Ring
+        run: sh ./fetch-dependencies.sh
+
+      - name: Aplicar a marca Subarashi
+        run: python3 subarashi/ios/rebrand_ios.py jami-ios subarashi/ios
+
+      - name: Compilar o app (sem assinatura)
+        working-directory: jami-ios
+        run: |
+          set -o pipefail
+          xcodebuild -project Ring/Ring.xcodeproj -scheme Ring -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log | grep -E "error:|warning: .*Subarashi|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" xcodebuild.log || { grep -n "error:" xcodebuild.log | head -40; exit 1; }
+
+      - name: Montar o .ipa
+        working-directory: jami-ios
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "App: $APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          A=Payload/$(basename "$APP")
+          # Extensões (notificações e "compartilhar") precisam de conta paga; fora.
+          rm -rf "$A/PlugIns" "$A/Extensions"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$A/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$A/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$A/Info.plist"
+          zip -qry ../Subarashi-iphone.ipa Payload
+          ls -la ../Subarashi-iphone.ipa
+
+      - name: Guardar o .ipa nesta execução
+        uses: actions/upload-artifact@v4
+        with:
+          name: Subarashi-iphone
+          path: Subarashi-iphone.ipa
+
+      - name: Publicar na aba Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-${{ github.run_number }}
+          name: Subarashi para iPhone (compilação ${{ github.run_number }})
+          body: |
+            App sem assinatura, para instalar com a sua conta Apple gratuita
+            (por exemplo, pelo Sideloadly). iOS 15 ou mais novo.
+            Com conta gratuita o app vale 7 dias e não recebe notificações:
+            chamadas e mensagens só chegam com o app aberto.
+          files: Subarashi-iphone.ipa
