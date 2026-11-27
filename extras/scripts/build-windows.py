@@ -318,6 +318,11 @@ def build(config_str, qt_dir, tests, build_version, enable_crash_reports,
 
     if enable_crash_reports:
         cmake_options.append("-DENABLE_CRASHREPORTS=ON")
+    # Subarashi: o QtWebEngine 6.12.0 publicado para Windows importa um símbolo
+    # (QAccessibleInterface::QAccessibleInterface()) que o Qt6Gui 6.12.0/6.12.1
+    # não exporta, e o Subarashi.exe nem abre. Sem WebEngine até o Qt corrigir.
+    if os.environ.get("SUBARASHI_WITH_WEBENGINE", "ON").upper() == "OFF":
+        cmake_options.append("-DWITH_WEBENGINE=OFF")
         if crash_report_url:
             cmake_options.append(f"-DCRASH_REPORT_URL={crash_report_url}")
     else:

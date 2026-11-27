@@ -56,6 +56,14 @@ No GitHub deste projeto: aba **Actions** > **Compilar Subarashi para Windows** >
 o programa é desconhecido (não tem assinatura digital): "Mais informações" >
 "Executar assim mesmo".
 
+Na versão de Windows, por enquanto, o **navegador embutido do Qt (QtWebEngine)
+fica desligado**: o pacote 6.12.0 que o Qt publicou para Windows não casa com o
+próprio Qt 6.12.0 e impedia o programa de abrir. Sem ele não aparecem o seletor
+de emojis, o compartilhamento de localização no mapa e a pré-visualização de
+vídeos dentro da conversa. Chamadas, chat, envio de arquivos e compartilhamento
+de tela funcionam normalmente. Dá para religar (`SUBARASHI_WITH_WEBENGINE`) quando
+o Qt publicar um WebEngine compatível.
+
 ## Baixar o programa pronto (Mac)
 
 Na aba **Actions**, rode **Compilar Subarashi para macOS**. O

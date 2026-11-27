@@ -28,6 +28,9 @@ jobs:
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-cache,readwrite"
       VCPKG_DISABLE_METRICS: "1"
       PYTHONIOENCODING: "utf-8"
+      # Ver extras/scripts/build-windows.py: o WebEngine 6.12.0 para Windows
+      # não casa com o Qt 6.12.0.
+      SUBARASHI_WITH_WEBENGINE: "OFF"
       # O vcpkg que já vem no Windows do GitHub não tem a versão fixada pelo
       # Jami; vazio faz o script baixar a versão certa.
       VCPKG_ROOT: ""
@@ -53,7 +56,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: D:\Qt
-          key: qt-6.12.0-msvc2022_64-v1-${{ hashFiles('.github/scripts/install_qt.py') }}
+          key: qt-6.12.0-msvc2022_64-v2-sem-webengine-${{ hashFiles('.github/scripts/install_qt.py') }}
 
       - name: Instalar o Qt 6.12
         shell: pwsh
@@ -63,7 +66,7 @@ jobs:
             "QT_ROOT_DIR=$root" | Out-File -Append $env:GITHUB_ENV
             echo "Qt já em cache: $root"
           } else {
-            python .github/scripts/install_qt.py 6.12.0 D:\Qt qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebengine qtwebchannel qtimageformats qtnetworkauth qtshadertools
+            python .github/scripts/install_qt.py 6.12.0 D:\Qt qt5compat qtmultimedia qtpositioning qthttpserver qtwebsockets qtwebchannel qtimageformats qtnetworkauth qtshadertools
             Get-Content $env:GITHUB_ENV | Select-String QT_ROOT_DIR
             ((Get-Content $env:GITHUB_ENV | Select-String "QT_ROOT_DIR=" | Select-Object -Last 1).ToString() -replace "QT_ROOT_DIR=","") | Out-File -Encoding ascii D:\Qt\qt-root.txt
           }
@@ -106,6 +109,9 @@ jobs:
             if (-not (Test-Path "x64/Release/$dll")) { throw "Faltou $dll no pacote" }
           }
           Copy-Item LEIA-ME-SUBARASHI.md x64/Release/
+          python -m pip install -q pefile
+          python .github/scripts/check_imports.py x64/Release
+          if ($LASTEXITCODE -ne 0) { throw "Pacote com DLLs incompatíveis" }
           Copy-Item COPYING x64/Release/LICENCA-GPLv3.txt -ErrorAction SilentlyContinue
           Compress-Archive -Path x64/Release/* -DestinationPath Subarashi-windows-x64.zip -Force
 
