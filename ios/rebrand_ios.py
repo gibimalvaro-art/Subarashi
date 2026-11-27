@@ -117,6 +117,19 @@ def main(repo, assets):
     t = f.read_text(encoding="utf-8")
     f.write_text(t.replace('"red" : "0x00"', '"red" : "0x21"'), encoding="utf-8")
 
+    # 6. Compatibilidade com o Xcode dos Macs do GitHub (26.3): o método de
+    #    push VoIP do iOS 26.4 usa PKVoIPPushMetadata, que esse SDK não tem.
+    #    Com conta gratuita não há push nenhum, e o método antigo continua lá.
+    delegate = app / "AppDelegate.swift"
+    t = delegate.read_text(encoding="utf-8")
+    pat = re.compile(r"\n    @available\(iOS 26\.4, \*\)\n    func pushRegistry\(_ registry: PKPushRegistry, "
+                     r"didReceiveIncomingVoIPPushWith payload: PKPushPayload, metadata: PKVoIPPushMetadata.*?\n    }\n", re.S)
+    t2, n = pat.subn("\n", t)
+    if n:
+        delegate.write_text(t2, encoding="utf-8")
+    print("método de push do iOS 26.4 removido:", n)
+    assert "PKVoIPPushMetadata" not in t2
+
     print("Marca Subarashi aplicada.")
 
 
