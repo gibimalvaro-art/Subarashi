@@ -47,7 +47,7 @@ jobs:
       - name: Escolher o Xcode mais novo
         run: |
           ls -d /Applications/Xcode*.app
-          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          X=$(ls -d /Applications/Xcode_*.app | grep -v -i beta | sort -V | tail -1)
           sudo xcode-select -s "$X"
           xcodebuild -version
 
@@ -82,6 +82,14 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/contrib-cache"
           export CACHE_DIR="$GITHUB_WORKSPACE/contrib-cache"
+          # O wget dos Macs do GitHub falha no TLS de alguns sites (ex.:
+          # ftp.openbsd.org, LibreSSL). Um "wget" falso que falha no --version
+          # faz o script do Jami usar o curl, que ele já prevê como alternativa.
+          mkdir -p "$RUNNER_TEMP/sem-wget"
+          printf '#!/bin/sh\nexit 1\n' > "$RUNNER_TEMP/sem-wget/wget"
+          chmod +x "$RUNNER_TEMP/sem-wget/wget"
+          export PATH="$RUNNER_TEMP/sem-wget:$PATH"
+          wget --version >/dev/null 2>&1 && { echo "wget ainda ativo"; exit 1; } || echo "usando curl"
           bash ./compile-ios.sh --platform=iPhoneOS --release
           ls xcframework
 
