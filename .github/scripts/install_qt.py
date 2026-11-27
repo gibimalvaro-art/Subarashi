@@ -78,19 +78,25 @@ def main():
         return sorted(set(d for d in re.findall(r'href="([^"?/:][^"]*)/"', listing)
                           if "src_doc" not in d))
 
-    def discover(url, depth):
+    only_nested = os.environ.get("QT_WEBENGINE_ONLY_NESTED") == "1"
+
+    def discover(url, depth, nested=False):
         for sub in subdirs(url):
             if (SHORT in sub or sub == ARCH) and "arm64" not in sub:
+                if only_nested and not nested:
+                    continue
                 pkgs.update(read_repo(f"{url}/{sub}"))
             elif depth > 0 and re.fullmatch(r"\d+", sub):
-                discover(f"{url}/{sub}", depth - 1)
+                discover(f"{url}/{sub}", depth - 1, True)
 
     if "qtwebengine" in modules:
         # Binários: <host>/extensions/qtwebengine/<versão>/... A versão do
         # WebEngine pode ser diferente da base (QT_WEBENGINE_VERSION), porque
         # o Qt publica o WebEngine com atraso em relação às versões de correção.
         wv = os.environ.get("QT_WEBENGINE_VERSION", version).replace(".", "")
-        discover(f"{BASE}/extensions/qtwebengine/{wv}", 2)
+        # QT_WEBENGINE_DEPTH=0 lê só <versão>/<plataforma>, sem descer para
+        # subpastas numéricas (que podem trazer um WebEngine de outra versão).
+        discover(f"{BASE}/extensions/qtwebengine/{wv}", int(os.environ.get("QT_WEBENGINE_DEPTH", "2")))
 
     if not pkgs:
         raise SystemExit("Nenhum índice do Qt encontrado")
